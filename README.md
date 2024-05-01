@@ -1,139 +1,79 @@
 # BALL-Single-Cell-Landscape
 
-This is the repository for scripts used in our Genome Biology paper "Splicing-accessible coding 3’UTRs control protein stability and interaction networks"
+This is the repository for scripts used in our manuscript "SINGLE CELL DISSECTION OF DEVELOPMENTAL ORIGINS AND TRANSCRIPTIONAL HETEROGENEITY IN B-CELL ACUTE LYMPHOBLASTIC LEUKEMIA"
 
 
 ==========================================================
-## Prepare penultimate exon annotation
+## Merge 89 SC samples and generate UMAP
 
-### Mouse Reference
-
-Version: Mus_musculus.GRCm38.98 \
-Script folder: 01_mouse_reference
-
-Extract eligible transcript
+Generate merged UMAP color-coded by subtype (Fig. 1b), cell type (ED Fig. 1c), or tissue (ED Fig. 1d)
 ```
-perl extract_eligible_transcript.pl Mus_musculus.GRCm38.98.chr.gtf mm10.fa
-cat StopCodonInLastExon.final.Mus_musculus.GRCm38.98.chr.gtf StopCodonInPenultimateExon.final.Mus_musculus.GRCm38.98.chr.gtf > final.Mus_musculus.GRCm38.98.chr.gtf
+Rscript Fig1b_UMAP_Merge.R
 ```
 
-Calculate amino acid content
+Generate tSNE of bulk RNA-seq and pseudo-bulk RNA-seq samples (ED Fig. 1b)
 ```
-perl calculate_AA.pl
-Rscript stat.R
-```
-
-Convert GTF to MISO GFF3 file
-```
-perl GenerateMisoSE.pl
+Rscript EDFig1b_tSNE_bulk.R
 ```
 
-Build MISO index
+Check somatic mutations in this cohort (ED Fig. 1a)
 ```
-index_gff --index mm10.SE.gff3 indexed_SE_events/
-```
-
-### Human Reference
-
-Version: Homo_sapiens.GRCh38.98 \
-Script folder: 02_human_reference
-
-Extract eligible transcript
-```
-perl extract_eligible_transcript.pl Homo_sapiens.GRCh38.98.chr.gtf hg38.fa
-cat StopCodonInLastExon.final.Homo_sapiens.GRCh38.98.chr.gtf StopCodonInPenultimateExon.final.Homo_sapiens.GRCh38.98.chr.gtf > final.Homo_sapiens.GRCh38.98.chr.gtf
-```
-
-Calculate amino acid content
-```
-perl calculate_AA.pl
-Rscript stat.R
-```
-
-Convert GTF to MISO GFF3 file
-```
-perl GenerateMisoSE.pl
-```
-
-Build MISO index
-```
-index_gff --index hg38.SE.gff3 indexed_SE_events/
-```
-
-### Liftover
-
-Script folder: 03_liftover
-
-```
-bash run_liftOver.sh
+Rscript EDFig1a_oncoprint.R
 ```
 
 ==========================================================
-## Process RNA-seq data
+## Dissect copy number heterogeneity using inferCNV
 
-Script folder: 04_data_processing
-
-### 1. download
+Run inferCNV for each sample
 ```
-bash run_download.sh
+Rscript Fig2_infercnv_command.R
 ```
 
-### 2. align using tophat2
+Plot copy number clone distribution (Fig. 2a)
 ```
-bash tophat.sh
+Rscript Fig2a_CNV_Barplot.R
 ```
 
-### 3. run miso
+Optimize inferCNV output using Complex Heatmap (Fig. 2b, Fig. 2d, ED Fig. 2c, ED Fig. 2e-g)
 ```
-bash insert_len.sh
-bash miso.sh
+Rscript Fig2bd_CNV_custom.R
 ```
-### 4. run kallisto
+
+Plot UMAP for each sample color-coded by cell type, copy number clone, or fusion status (Fig. 2c, Fig. 2e, ED Fig. 2d and ED Fig. 2h)
 ```
-bash kallisto.sh
+Rscript Fig2ce_UMAP.R
+```
+
+Validate copy number clone using scWGS (Fig. 2f and ED Fig. 2i)
+```
+Rscript Fig2f_scWGS.R
 ```
 
 ==========================================================
-## Do statistics and plotting   
+## Dissect transcriptomic heterogeneity using cNMF
 
-Script folder: 05_statistics
-
-### Mouse_tissue
-
-Figures: Fig 1B, 1C, 1E, S1B, S1C
+Run cNMF for each sample
 ```
-perl combine_mouse_tissue_penultimate.pl
-Rscript	mouse_tissue_penultimate_stat.R
-```
- 
-Figures: Fig S1F
-```
-Rscript combine_plot.R
+Rscript Fig2_cnmf_command.sh
 ```
 
-### Mouse_neuron
-
-Figures: Fig 1D, S1D, S1E
+Plot pairwise correlation heatmap for each subtype (Fig. 2h and ED Fig. 3a)
 ```
-Rscript neuron_stat.R
+Rscript Fig2h_NMF_subtype.R
 ```
 
-Figures: Fig S1G, S1H
+Use GSEA to define each NMF program (Fig. 2i)
 ```
-bash run_motif.sh
-Rscript gene_stat.R
-```
-
-### Human_tissue
-
-Figures: Fig 4A, S4A, S4B
-```
-perl combine_human.pl
-Rscript human_stat.R
+Fig2i_GSEA.R 
 ```
 
-### Note 
-Fig 4B, S4D are schematic illustration using Inkscape \
-Fig 4C, S4C are generated using `plot_overlap_v2.R` in 03_liftover \
-Fig 3A, 4E are generated using `mouse_aa_stat.R` in 01_mouse_reference and `human_aa_stat.R` in 02_human_reference \
-Fig 3D is a simple boxplot generated in 2015 ...
+Check correlation of NMF programs across subtypes (Fig. 2j)
+```
+Rscript Fig2j_NMF_pairwise.R
+```
+
+Check subtype specificity of NMF signature genes (ED Fig.3b)
+```
+Rscript EDFig3b_NMF_specificity.R
+```
+
