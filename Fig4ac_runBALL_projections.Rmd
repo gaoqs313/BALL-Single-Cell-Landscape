@@ -1,0 +1,414 @@
+---
+title: "B-ALL Rapid Projections"
+output: html_notebook
+---
+
+Rapid projections for B-ALL data
+
+```{r}
+library(Seurat)
+library(symphony)
+library(tidyverse)
+```
+
+**Bone Marrow Reference Map**
+
+```{r}
+BM_projection_path = '../../../../../../AMLhierarchies/scRNA_projection/Complete_Hematopoiesis/BM_V2only/Final_Embedding/Final_projections/ProjectionTools/'
+source(paste0(BM_projection_path, 'Symphony_Utils_BMref.R'))
+BM_ref <- readRDS(paste0(BM_projection_path, 'BoneMarrow_RefMap_SymphonyRef.rds'))
+
+# Fix uwot path for UMAP projection - point it to the directory with Projection Tools
+BM_ref$save_uwot_path <- paste0(BM_projection_path, BM_ref$save_uwot_path)
+```
+
+```{r, fig.height = 4.5, fig.width = 10}
+ReferenceSeuratObj_BM <- CreateReferenceSeuratObj(BM_ref)
+DimPlot(ReferenceSeuratObj_BM, reduction = 'umap', group.by = 'CellType_Annotation_formatted', raster=FALSE, label=TRUE, label.size = 4)
+```
+
+**Cross-Ontogeny B-Development Map**
+
+```{r}
+Bdev_projection_path = 'BDevelopment_ProjectionTools/'
+Bdev_ref <- readRDS(paste0(Bdev_projection_path, 'BDevelopment_RefMap_SymphonyRef.rds'))
+
+# Fix uwot path for UMAP projection - point it to the directory with Projection Tools
+Bdev_ref$save_uwot_path <- paste0(Bdev_projection_path, Bdev_ref$save_uwot_path)
+```
+
+```{r, fig.height = 5, fig.width = 11}
+ReferenceSeuratObj_Bdev <- CreateReferenceSeuratObj(Bdev_ref)
+# flip UMAP1 axis
+ReferenceSeuratObj_Bdev[['umap']]@cell.embeddings[,1] = -ReferenceSeuratObj_Bdev[['umap']]@cell.embeddings[,1]
+DimPlot(ReferenceSeuratObj_Bdev, reduction = 'umap', group.by = 'BDevelopment_CellType_Comprehensive', raster=FALSE, label=TRUE, label.size = 5)
+```
+
+
+### Run Samples
+
+```{r}
+library(ggpointdensity)
+library(viridis)
+library(jcolors)
+```
+
+```{r}
+map_sample_BM <- function(seurat_obj, batch_key){
+  
+  # Map cells
+  seurat_obj <- mapQuery(
+      seurat_obj@assays$RNA@counts, 
+      seurat_obj@meta.data,
+      BM_ref,
+      vars = batch_key, 
+      return_type = 'Seurat'
+  ) %>% calcMappingError(., reference = BM_ref, MAD.threshold = 2)
+  
+  # Predict Labels 
+  seurat_obj <- knnPredict.Seurat(
+    seurat_obj, 
+    BM_ref, 
+    label_transfer = 'CellType_Annotation', 
+    k = 30
+  ) 
+  
+  return(seurat_obj)
+}
+```
+
+```{r}
+library(ggpointdensity)
+library(jcolors)
+
+plot_projection <- function(dat, ptx_id, refUMAP = refUMAP, downsample_reference = TRUE, save_folder = 'BALL_projections/Complete_BoneMarrowReference/Figures/'){
+  
+  if(downsample_reference){
+    refUMAP <- refUMAP %>% sample_frac(0.25)
+  }
+  
+  dat <- dat@meta.data %>% rownames_to_column('Cell') %>% 
+    left_join(dat@reductions$umap@cell.embeddings %>% data.frame() %>% rownames_to_column('Cell') ) %>% 
+    filter(mapping_error_QC == 'Pass') %>% 
+    mutate(ref_query = 'query') %>% 
+    bind_rows(refUMAP)
+  
+  ## Get the Background
+  background <-  dat %>% filter(ref_query == 'reference') %>% select(-Sample)
+  heatpalette <- heat.colors(12)
+  
+  p <- dat %>% 
+    filter(ref_query == 'query') %>% 
+    ggplot(aes(x = umap_1, y = umap_2)) +  
+    geom_point(data = background, color='#E3E3E3', size=0.01, alpha=0.5) + 
+    geom_pointdensity(size=0.05) +
+    scale_color_jcolors_contin("pal3", reverse = TRUE, bias = 1.75) +
+    geom_density_2d(alpha=0.4, color='black', h = 1.5, size=0.4) + 
+    theme_void() + ggtitle(ptx_id) + 
+    theme(strip.text.x = element_text(size=18), legend.position='none') 
+  
+  ggsave(paste0(save_folder, ptx_id, '_BoneMarrowReference_projectedUMAP.pdf'), height = 4, width = 6)
+}
+```
+
+```{r}
+get_composition_BM <- function(BALL, composition_BM){
+  # get composition per cell
+  sample_composition <- BALL@meta.data %>% rownames_to_column('barcode') %>% 
+    select(barcode, Sample, mapping_error_score, mapping_error_QC, 
+           CellType_Annotation, CellType_Annotation_prob)
+  
+  # concatenate lol
+  composition_BM <- bind_rows(composition_BM, sample_composition)
+  return(composition_BM)
+}
+``` 
+
+
+### Now lets iterate through samples and run
+
+```{r}
+basepath = 'BALL_rawdata/Expanded/'
+matrixpath = '/filtered_feature_bc_matrix/'
+BALL_patients <- list.files(basepath)
+BALL_patients
+```
+
+```{r}
+refUMAP <- data.frame(BM_ref$umap$embedding) %>% rename(umap_1 = X1, umap_2 = X2) %>% mutate(ref_query = 'reference')
+BALL_composition_BMref <- data.frame()
+
+# Test the first sample
+for(pt_samp in BALL_patients){
+  print(paste0('Mapping: ', pt_samp))
+  start_time <- Sys.time()
+  
+  # load in as seurat obj
+  BALL <- Seurat::Read10X(paste0(basepath, pt_samp, matrixpath)) %>% CreateSeuratObject()
+  BALL$Sample <- pt_samp
+
+  # QC >500 genes, >2500 counts, <8% mt counts
+  BALL <- Seurat::PercentageFeatureSet(BALL, pattern = '^MT-', col.name = 'pct.mito')
+  BALL <- subset(BALL, nFeature_RNA > 500 & nCount_RNA > 2500 & pct.mito < 8)
+  print(paste0('Post QC Cells: n = ', dim(BALL)[2]))
+
+  # Map sample onto reference map and label with 30 KNN, no batch correction
+  BALL <- map_sample_BM(BALL, NULL)
+  # plot projected cells onto UMAP 
+  plot_projection(BALL, pt_samp, refUMAP = refUMAP, downsample_reference = TRUE, save_folder = 'BALL_projections/Complete_BoneMarrowReference/Figures/')
+  # get celltype composition
+  BALL_composition_BMref <- get_composition_BM(BALL, BALL_composition_BMref)
+  # save
+  BALL %>% saveRDS(paste0("BALL_projections/Complete_BoneMarrowReference/", pt_samp, "_projected.rds"))
+  rm(BALL)
+  
+  end_time <- Sys.time()
+  print(end_time - start_time)
+  gc()
+}
+
+BALL_composition_BMref %>% write_csv('BALL_projections/Complete_BoneMarrowReference/BALL_celltype_annotations_FullReference.csv')
+```
+
+# Project onto B Cell Development 
+
+```{r}
+map_sample_BDev <- function(seurat_obj, batch_key){
+  # Map cells
+  seurat_obj <- mapQuery(
+      seurat_obj@assays$SymphonyQuery@counts, 
+      seurat_obj@meta.data,
+      Bdev_ref,
+      vars = batch_key, 
+      return_type = 'Seurat'
+  ) 
+  
+  # Predict Labels 
+  seurat_obj <- knnPredict.Seurat(
+    seurat_obj, 
+    Bdev_ref, 
+    label_transfer = 'BDevelopment_CellType_Comprehensive', 
+    k = 30
+  ) 
+  return(seurat_obj)
+}
+```
+
+
+```{r}
+library(ggpointdensity)
+library(jcolors)
+
+plot_BDev_projection <- function(dat, ptx_id, refUMAP, downsample_reference = TRUE, save_folder = 'BALL_projections/Focused_BDevelopment/Figures/'){
+  
+  if(downsample_reference){
+    set.seed(123)
+    refUMAP <- refUMAP %>% sample_frac(0.5)
+  }
+  
+  dat <- dat@meta.data %>% rownames_to_column('Cell') %>% 
+    left_join(dat@reductions$umap@cell.embeddings %>% data.frame() %>% rownames_to_column('Cell') ) %>% 
+    filter(mapping_error_QC == 'Pass') %>% 
+    mutate(ref_query = 'query') %>% 
+    bind_rows(refUMAP)
+  
+  ## Get the Background
+  background <-  dat %>% filter(ref_query == 'reference') %>% select(-Sample)
+  heatpalette <- heat.colors(12)
+  
+  p <- dat %>% 
+    filter(ref_query == 'query') %>% 
+    ggplot(aes(x = -umap_1, y = umap_2)) +  
+    geom_point(data = background, color='#E3E3E3', size=0.005, alpha=0.5) + 
+    geom_pointdensity(size=0.02) +
+    scale_color_jcolors_contin("pal3", reverse = TRUE, bias = 1.75) +
+    geom_density_2d(alpha=0.4, color='black', h = 1.5, size=0.3) + 
+    theme_void() + ggtitle(ptx_id) + 
+    theme(strip.text.x = element_text(size=18), legend.position='none') 
+  
+  ggsave(paste0(save_folder, ptx_id, '_BdevelopmentReference_projectedUMAP.pdf'), height = 4, width = 6)
+}
+```
+
+
+```{r}
+get_UMAPcoordinates <- function(BALL, umap_coordinates){
+  # get composition per cell
+  sample_coordinates <- BALL@meta.data %>% rownames_to_column('barcode') %>%
+    select(barcode, Sample) %>% 
+    left_join(BALL@reductions$umap@cell.embeddings %>% data.frame() %>% rownames_to_column('barcode') )
+  
+  # concatenate 
+  umap_coordinates <- bind_rows(umap_coordinates, sample_coordinates)
+  return(umap_coordinates)
+}
+``` 
+
+
+```{r}
+get_composition_Bdev <- function(BALL, composition_Bdev){
+  # get composition per cell
+  sample_composition <- BALL@meta.data %>% rownames_to_column('barcode') %>%
+    select(barcode, Sample, BDevelopment_CellType_Comprehensive, BDevelopment_CellType_Comprehensive_prob)
+  
+  # concatenate 
+  composition_Bdev <- bind_rows(composition_Bdev, sample_composition)
+  return(composition_Bdev)
+}
+``` 
+
+
+
+### Approach
+
+For each projected sample we will subset the following celltypes: 
+  - HSC, MPP-LMPP, LMPP, Early GMP, MLP, MLP-II
+  - Pre-pDC, Pre-pDC Cycling, pDC
+  - CLP, Pre-ProB, Pro-B VDJ, Pro-B Cycling, Large Pre-B, Small Pre-B, Immature B, Mature B
+  
+```{r}
+BDev_celltypes <- c('HSC', 'HSC/MPP', 'MPP-MyLy', 'MPP-LMPP', 'LMPP', 'Early GMP', 'MLP', 'MLP-II', 'Pre-pDC', 'Pre-pDC Cycling', 'pDC', 
+                    'CLP', 'EarlyProB', 'Pre-ProB', 'Pro-B VDJ', 'Pro-B Cycling', 'Large Pre-B', 'Small Pre-B', 'Immature B', 'Mature B')
+```
+  
+```{r}
+projectedpath = 'BALL_projections/Complete_BoneMarrowReference/'
+#matrixpath = '/filtered_feature_bc_matrix/'
+BALL_patients_projected <- list.files(projectedpath, pattern = 'rds')
+BALL_patients_projected
+```
+
+
+```{r}
+BALL_patients_projected[1]
+BALL <- readRDS(paste0(projectedpath, BALL_patients_projected[1])) 
+BALL
+```
+
+```{r}
+BALL_UMAPcoordinates_BMref <- data.frame()
+BALL_UMAPcoordinates_BMref <- get_UMAPcoordinates(BALL, BALL_UMAPcoordinates_BMref)
+BALL_UMAPcoordinates_BMref
+```
+
+### MAKE SURE TO RECORD UMAP COORDINATES from normal and from BDev
+
+```{r}
+refUMAP_bdev <- data.frame(Bdev_ref$umap$embedding) %>% rename(umap_1 = X1, umap_2 = X2) %>% mutate(ref_query = 'reference')
+BALL_composition_BDev <- data.frame()
+BALL_UMAPcoordinates_BMref <- data.frame()
+BALL_UMAPcoordinates_BDev <- data.frame()
+
+# Test the first sample
+for(pt_samp in BALL_patients_projected){
+  print(paste0('Mapping: ', pt_samp))
+  start_time <- Sys.time()
+  # load in as seurat obj
+  BALL <- readRDS(paste0(projectedpath, pt_samp)) 
+  # get UMAP coordinates from BM Reference mapping
+  BALL_UMAPcoordinates_BMref <- get_UMAPcoordinates(BALL, BALL_UMAPcoordinates_BMref)
+  # subset to include B development lineage
+  BALL <- subset(BALL, CellType_Annotation %in% BDev_celltypes)
+  # Map sample onto reference map and label with 30 KNN, no batch correction
+  pt_samp <- pt_samp %>% str_replace('_projected.rds','')
+  BALL <- map_sample_BDev(BALL, NULL)
+  # plot projected cells onto UMAP 
+  plot_BDev_projection(BALL, pt_samp, refUMAP = refUMAP_bdev, downsample_reference = TRUE, save_folder = 'BALL_projections/Focused_BDevelopment/Figures/')
+  # get celltype composition
+  BALL_composition_BDev <- get_composition_Bdev(BALL, BALL_composition_BDev)
+  # get UMAP coordinates from BDevelopment mapping 
+  BALL_UMAPcoordinates_BDev <- get_UMAPcoordinates(BALL, BALL_UMAPcoordinates_BDev)
+  # save
+  BALL %>% saveRDS(paste0("BALL_projections/Focused_BDevelopment/", pt_samp, "_projected_BDevFocus.rds"))
+  rm(BALL)
+  
+  end_time <- Sys.time()
+  print(end_time - start_time)
+  gc()
+}
+# save cell annotations
+BALL_composition_BDev %>% write_csv('BALL_projections/Focused_BDevelopment/BALL_celltype_annotations_Bdevelopment.csv')
+# save UMAP coordinates for FullReference and BDevelopment
+BALL_UMAPcoordinates_BMref %>% write_csv('BALL_projections/Complete_BoneMarrowReference/BALL_UMAPcoordinates_FullReference.csv')
+BALL_UMAPcoordinates_BDev %>% write_csv('BALL_projections/Focused_BDevelopment/BALL_UMAPcoordinates_Bdevelopment.csv')
+```
+
+```{r}
+BALL_UMAPcoordinates_BMref %>% write_csv('BALL_projections/Complete_BoneMarrowReference/BALL_UMAPcoordinates_FullReference.csv')
+BALL_UMAPcoordinates_BDev %>% write_csv('BALL_projections/Focused_BDevelopment/BALL_UMAPcoordinates_Bdevelopment.csv')
+```
+
+
+
+
+### Get Composition
+
+
+```{r}
+BALL_composition_BMref <- read_csv('BALL_projections/Complete_BoneMarrowReference/BALL_celltype_annotations_FullReference.csv')
+BALL_composition_BDev <- read_csv('BALL_projections/Focused_BDevelopment/BALL_celltype_annotations_Bdevelopment.csv')
+```
+
+```{r}
+BALL_UMAPcoordinates_BMref <- read_csv('BALL_projections/Complete_BoneMarrowReference/BALL_UMAPcoordinates_FullReference.csv')
+BALL_UMAPcoordinates_BDev <- read_csv('BALL_projections/Focused_BDevelopment/BALL_UMAPcoordinates_Bdevelopment.csv')
+```
+
+
+```{r}
+BALL_UMAPcoordinates_BMref %>% dplyr::rename(FullReference_UMAP1 = umap_1, FullReference_UMAP2 = umap_2)
+BALL_UMAPcoordinates_BDev %>% mutate(umap_1 = -umap_1) %>% dplyr::rename(BDevelopment_UMAP1 = umap_1, BDevelopment_UMAP2 = umap_2)
+```
+
+```{r}
+BALL_composition <- 
+  BALL_composition_BMref %>% 
+  left_join(BALL_composition_BDev) %>%
+  left_join( BALL_UMAPcoordinates_BMref %>% dplyr::rename(UMAP1_FullReference = umap_1, UMAP2_FullReference = umap_2) ) %>% 
+  left_join( BALL_UMAPcoordinates_BDev %>% mutate(umap_1 = -umap_1) %>% dplyr::rename(UMAP1_BDevelopment = umap_1, UMAP2_BDevelopment = umap_2) ) %>% 
+  mutate(CellType_Annotation = CellType_Annotation %>% as.character(), 
+         BDevelopment_CellType_Comprehensive = BDevelopment_CellType_Comprehensive %>% as.character()) %>%
+  mutate(Final_CellType = ifelse(is.na(BDevelopment_CellType_Comprehensive), CellType_Annotation, BDevelopment_CellType_Comprehensive),
+         Final_CellType_prob = ifelse(is.na(BDevelopment_CellType_Comprehensive_prob), CellType_Annotation_prob, BDevelopment_CellType_Comprehensive_prob)) %>%
+  select(Cell = barcode, Directory = Sample, Final_CellType, Final_CellType_prob, everything()) 
+
+BALL_composition %>% write_csv('BALL_projections/BALL_89pt_CellType_FinalAssignments.csv')
+BALL_composition
+```
+
+
+```{r}
+BALL_composition %>% pull(Directory) %>% table() %>% sort()
+```
+
+
+### Methods
+
+Raw counts from filtered BALL cells were projected onto the bone marrow reference map using Symphony (Kang et al). 
+Filtering criteria was: 
+  - % mito < 8
+  - nCount_RNA > 2500
+  - nFeature_RNA > 500
+  
+Cells assigned to be within the B-cell development lineage: 
+  - HSC, MPP-LMPP, LMPP, Early GMP, MLP, MLP-II
+  - CLP, Pre-ProB, Pro-B VDJ, Pro-B Cycling, Large Pre-B, Small Pre-B, Immature B, Mature B
+  - Pre-pDC, Pre-pDC Cycling, pDC
+
+Were subsetted and projected onto the cross-ontogeny map of B-cell development using Symphony to refine cell type classification along the B cell lineage.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

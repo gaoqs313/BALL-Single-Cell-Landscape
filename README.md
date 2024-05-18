@@ -77,3 +77,52 @@ Check subtype specificity of NMF signature genes (ED Fig.3b)
 Rscript EDFig3b_NMF_specificity.R
 ```
 
+==========================================================
+## Establish a normal human B-cell development atlas
+
+Establish a single-cell atlas (Fig. 3c)
+```
+Fig3c_BDev_ProjectionSetup.Rmd
+Fig3c_BDev_ProjectionSetup.html
+```
+
+==========================================================
+## B-ALL projection along B cell development
+
+Project B-ALL cells onto B cell development reference (Fig. 4a, Fig. 4c)
+```
+Fig4ac_runBALL_projections.Rmd
+Fig4ac_runBALL_projections.html
+```
+
+B-ALL composition analysis (Fig. 4d)
+```
+Fig4d_BALL_CompositionAnalysis.Rmd
+Fig4d_BALL_CompositionAnalysis.html
+```
+
+ADD SCRIPTS FOR FIGURE 4 E-H UMAPS
+
+==========================================================
+## Bulk RNA-seq analysis using LASSO regression
+
+Bulk RNA-seq analysis using LASSO regression (ED Fig. 7)
+```
+ED Fig. 7_DevState_LASSOregression.Rmd
+ED Fig. 7_DevState_LASSOregression.html
+```
+
+B-ALL Dev State Analysis (Fig. 5a-c, ED Fig. 6-8)
+```
+Fig5a-c_BALL_Multipotency_Characterization.ipynb
+```
+
+==========================================================
+## B-ALL Composition Multipotency Score
+
+B-ALL Composition Multipotency Score (Fig. 5 d-l, Fig. 6, ED Fig. 9-10)
+```
+Fig5i-l&6_BALL_MultipotencyScore.Rmd
+Fig5i-l&6_BALL_MultipotencyScore.html
+```
+

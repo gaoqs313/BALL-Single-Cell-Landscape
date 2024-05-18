@@ -1,0 +1,101 @@
+---
+title: "BDevelopment Projection Setup"
+output: html_notebook
+---
+
+#### RERUN AND OPTIMIZE
+
+```{r}
+library(tidyverse)
+library(Seurat)
+library(scran)
+library(scater)
+library(symphony)
+
+source('../../../../../../AMLhierarchies/scRNA_projection/Complete_Hematopoiesis/BM_V2only/Final_Embedding/bmcatv2_projections/utils_seurat.R')
+```
+
+
+```{r}
+#SeuratDisk::Convert('Bcell_Development_CrossOntogeny_bare.h5ad', dest = 'h5seurat', overwrite=TRUE)
+bdev <- SeuratDisk::LoadH5Seurat('../Bcell_Development_CrossOntogeny_bare.h5seurat', misc = FALSE)
+bdev <- bdev %>%
+    NormalizeData(normalization.method = "LogNormalize", scale.factor = 10000)
+slot(object = bdev[['RNA']], name = "counts") <- new(Class = "matrix")
+```
+
+```{r}
+bdev@meta.data <- bdev@meta.data %>% rownames_to_column('Cell') %>% 
+  left_join(read_csv('../BDevelopment_CrossOntogeny_CellType_FinalLabels.csv')) %>% 
+  column_to_rownames('Cell')
+bdev@meta.data
+```
+
+```{r}
+bdev$Study_Donor <- paste0(as.character(bdev$Study), '__', as.character(bdev$Donor))
+bdev$Study_Tissue <- paste0(as.character(bdev$Study), '__', as.character(bdev$Tissue))
+bdev$Study_Tissue <- ifelse(bdev$Technology == '10X 5prime', 'Jardine_FetalBoneMarrow__Fetal Bone Marrow 10x5prime', bdev$Study_Tissue)
+```
+
+# Features: by Technology, Min Disp 1
+
+```{r}
+VariableFeatures(bdev) <- read_csv("../Bdev_HVGs_Intersect.csv") %>% filter(HVG_byDonor_perTech_minDisp1) %>% pull(Gene) %>% unique()
+bdev <- bdev %>% ScaleData() %>% RunPCA()
+
+vargenes <- 'byDonor_perTech_minDisp1'
+```
+
+### FINAL EMBEDDING
+
+```{r}
+bdev <- RunHarmony.Seurat(bdev, group.by.vars = c('Study_Donor'), theta = c(1), max.iter.harmony = 20, max.iter.cluster = 200, 
+                           verbose = TRUE, project.dim = FALSE, plot_convergence = TRUE)
+```
+
+########### Donor 1; 100 Neighbours; 30 Harmony components; mindist 0.29
+
+```{r, fig.height=6, fig.width=12}
+run_param <- 'Donor1_100neighbors_30pcs'
+
+bdev[['umap']] <- RunUMAP2(Embeddings(bdev, 'harmony')[, 1:30], 
+                             n.neighbors = 100L, min.dist = 0.29, spread=0.9, 
+                             assay='RNA', verbose=FALSE, umap.method='uwot', return.model=TRUE)
+
+DimPlot(bdev, reduction = 'umap', group.by = c('BDevelopment_CellType_Formatted'), raster=FALSE, label=TRUE, ncol=1) 
+```
+
+
+```{r, fig.height=6, fig.width=12}
+bdev[['umap_custom']] <- bdev[['umap']]
+bdev[['umap_custom']]@cell.embeddings[,1] = -bdev[['umap_custom']]@cell.embeddings[,1]
+DimPlot(bdev, reduction = 'umap_custom', group.by = c('BDevelopment_CellType_Formatted'), raster=FALSE, label=TRUE, ncol=1) 
+```
+
+```{r}
+ref = buildReferenceFromSeurat(bdev, save_uwot_path = 'cache_symphony_Bdevelopment.uwot')
+ref %>% summary()
+```
+
+
+```{r}
+saveRDS(bdev, file = 'BDevelopment_RefMap_AnnotatedCounts.rds')
+saveRDS(bdev_ref, file = 'BDevelopment_RefMap_SymphonyRef.rds')
+
+#save(ref, bmcat, file = 'BoneMarrow_RefMap_SymphonyRef_with_AnnotatedCounts.RData')
+```
+
+
+```{r}
+gc()
+```
+
+
+
+
+
+
+
+
+
+

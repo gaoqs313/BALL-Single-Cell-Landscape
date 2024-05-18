@@ -1,0 +1,1431 @@
+---
+title: "B-ALL Composition Multipotency Score"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+library(ggpubr)
+library(survival)
+library(survminer)
+library(patchwork)
+```
+
+```{r}
+bulk2046 <- read_csv('BALL2046_DevState_Updated_April2024_Fusions_MRD_AZ.csv')
+bulk2046 
+```
+
+# PCA on Dev State Abundance
+Include the four main lineages along B cell development
+
+```{r}
+LineageScores <- bulk2046 %>% select(PatientID, HSC_MPP, Early_Lymphoid, Pro_B, Pre_B) %>%   
+  column_to_rownames('PatientID') %>% data.matrix()
+bulk2046$PC1 <- prcomp(LineageScores)[5]$x[,1]
+prcomp(LineageScores, scale=T, center=T)
+```
+
+## Principal Component 1 is a Multipotency Score 
+
+```{r}
+DevState_PCA <- data.frame(prcomp(LineageScores, scale=T, center=T)[2]$rotation) %>% rownames_to_column('DevState')
+color <- ifelse(DevState_PCA$PC1 > 0, 'darkgreen', 'darkorange')
+
+
+DevState_PCA %>% 
+  mutate(DevState = factor(DevState %>% str_replace('HSC_MPP', 'HSC/MPP') %>% str_replace('_B','-B') %>% str_replace('_',' '), 
+                           levels = rev(c("HSC/MPP", "Early Lymphoid", "Pro-B", "Pre-B")))) %>% 
+  ggplot(aes(x = DevState, y = PC1)) +
+  geom_bar(stat = "identity", show.legend = FALSE, fill = color, color = "white") +
+  geom_hline(yintercept = 0, color = 1, lwd = 0.2) +
+  geom_text(aes(label = DevState, # Text with groups
+                hjust = ifelse(PC1 < 0, 1.25, -0.15),
+                vjust = 0.5), size = 3.5) +
+  xlab("Developmental State") + ylab("PC1 Feature Loadings") +
+  scale_y_continuous(breaks = seq(-1, 1, by = 0.25), limits = c(-0.8, 0.8)) +
+  coord_flip() +
+  theme_minimal() +
+  theme(axis.text.y = element_blank(),  # Remove Y-axis texts
+        axis.ticks.y = element_blank(), # Remove Y-axis ticks
+        panel.grid.major.y = element_blank(),
+        panel.grid.minor.x = element_blank()) # Remove horizontal grid
+
+ggsave('BALL_MultipotencyScore_Figures/MultipotencyScore_PC1_FeatureLoadings.pdf', height = 3.2, width=6)
+```
+
+### Derive gene signature for estimating PC1 
+
+```{r}
+train_LASSO <- function(x_train, y_train, alpha = 1){
+  
+  train_y <- y_train$PC1
+  
+  # Perform Lasso regression with LOOCV 
+  model <- cv.glmnet(x = x_train, y = train_y, nfold = 10, family = 'gaussian', alpha = alpha, maxit=1000000, standardize=FALSE)
+  #plot(model)
+
+  return(model)
+}
+
+evaluate_model <- function(model, x_val, anno_val, lambda, 
+                           feature_name, iteration, foldname){
+
+  # Create score classification with survival and get covariates
+  pred_y <- predict(model, x_val, s = lambda) %>% data.frame()
+  colnames(pred_y) <- 'PredScore'
+  pred_y <- pred_y %>% rownames_to_column('Patient') %>% 
+    # add anno to get covariates
+    left_join(anno_val, by = 'Patient')
+  
+  # Calculate correlation in validation set
+  pearson <- cor(pred_y$PredScore, pred_y$PC1, method = 'pearson')
+  spearman <- cor(pred_y$PredScore, pred_y$PC1, method = 'spearman')
+  
+  # Summary Metrics
+  summary_metrics <- data.frame(
+    'model_id' = paste0(feature_name, '_iter', iteration, '_', foldname),
+    'lambda' = lambda,
+    'model_size' = sum(coef(model, s = lambda)!=0),
+    'pearson' = pearson,
+    'spearman' = spearman,
+    'features' = feature_name,
+    'iteration' = iteration,
+    'foldname' = foldname
+  )
+  return(summary_metrics)
+}
+
+
+gridsearch_lasso <- function(expr_train, expr_val, anno_train, anno_val, features, feature_name,
+                             iteration, foldname, summary_metrics){
+  
+  # Filter expr matrix for feature set
+  x_train <- expr_train[, colnames(expr_train) %in% features]
+  x_val <- expr_val[, colnames(expr_val) %in% features]
+
+  # Train LASSO 
+  model <- train_LASSO(x_train, anno_train)
+
+  # Get summary metrics for lambda.min and lambda.1se
+  for(lambda in c('lambda.min', 'lambda.1se')){
+    summary_metrics <- summary_metrics %>% rbind(
+      evaluate_model(model = model, x_val = x_val, anno_val = anno_val, lambda = lambda, 
+                     feature_name = feature_name, iteration = iteration, foldname = foldname))
+  }
+  
+  return(summary_metrics)
+}
+
+
+nestedCV_regression <- function(train_anno, train_expr, iteration, feature_sets, summary_metrics){
+  # set up random seed and shuffle data 
+  set.seed(iteration)
+  train_anno <- train_anno[sample(nrow(train_anno)),]
+  train_expr <- train_expr[sample(nrow(train_expr)),]
+  
+  ## 10-fold outer cross validation
+  folds <- rsample::vfold_cv(train_anno, 10)
+  for(outer_cv in 1:10){
+    # fold ID
+    foldname <- folds$id[[outer_cv]]
+    # get anno splits
+    anno_train <- analysis(folds$splits[[outer_cv]])
+    anno_val <- assessment(folds$splits[[outer_cv]])
+    # get expr splits
+    expr_train <- train_expr[anno_train$Patient,]
+    expr_val <- train_expr[anno_val$Patient,]
+    
+    # Iterate through feature set and run gridsearch to train survival functions
+    for(feature_name in names(feature_sets)){
+      # get feature list
+      features <- feature_sets[[feature_name]]
+      # run gridsearch and get results
+      summary_metrics <- gridsearch_lasso(expr_train = expr_train, expr_val = expr_val, anno_train = anno_train, anno_val = anno_val, 
+                                  features = features, feature_name = feature_name, iteration = iteration, foldname = foldname,
+                                  summary_metrics = summary_metrics)
+    }
+  }
+  return(summary_metrics)
+}
+
+```
+
+```{r}
+bulk2046_vst <- readRDS('../BALL2046_BulkRNA_vst.rds')
+bulk2046_vst %>% dim()
+```
+
+```{r}
+# Train from genes used to predict the four bdev lineage populations
+modelweights <- read_csv("../NMF_Lasso_ModelWeights.csv") %>% select(Gene, HSC_MPP, Early_Lymphoid, Pro_B, Pre_B) %>% 
+  rowwise() %>% mutate(sumweights = sum(HSC_MPP, Early_Lymphoid, Pro_B, Pre_B)) %>% filter(sumweights != 0) %>% select(-sumweights) 
+
+bulk2046_vst_filtered <- bulk2046_vst[modelweights$Gene,] 
+bulk2046_vst_filtered %>% dim()
+```
+
+```{r}
+library(tidymodels)
+library(glmnet)
+
+CVoutput <- data.frame()
+train_x <- bulk2046_vst_filtered[,bulk2046$SampleID_old] %>% t()
+train_y <- bulk2046 %>% select(Patient = SampleID_old, PC1)# %>% mutate(PC1 = -PC1)
+featurespace <- list('ModelWeights115' = modelweights$Gene)
+temp_output <- data.frame()
+
+
+for(iteration in 1:10){
+  print(paste0('iteration ', iteration))
+  CVoutput <- nestedCV_regression(train_anno = train_y, train_expr = train_x, iteration = iteration, feature_sets = featurespace, 
+                                summary_metrics = CVoutput) 
+}
+## annotate and add to final output
+CVoutput 
+CVoutput %>% write_csv('RepNestedCV_results_PC1multipotency_Regression.csv')
+```
+
+```{r}
+train_LASSO <- function(x_train, y_train, alpha = 1){
+  
+  train_y <- y_train$PC1
+  
+  # Perform Lasso regression with LOOCV 
+  model <- cv.glmnet(x = x_train, y = train_y, nfold = 10, family = 'gaussian', alpha = alpha, maxit=1000000, standardize=FALSE)
+  #plot(model)
+
+  return(model)
+}
+```
+
+
+```{r}
+model <- train_LASSO(train_x, y_train = train_y)
+
+# PC1 model weights
+PC1_modelweights <- data.frame()
+
+PC1_modelweights <- model %>% coef(s = 'lambda.1se') %>% data.matrix() %>% 
+      data.frame() %>% dplyr::rename(Weight = s1) %>% rownames_to_column('Gene') %>% 
+      tail(-1) %>% filter(Weight != 0) %>% arrange(-Weight) 
+    
+PC1_modelweights <- PC1_modelweights %>% select(Gene, Weight)
+PC1_modelweights
+```
+
+```{r}
+# Create final model matrix
+modelweights_withMultipotency <- read_csv("../NMF_Lasso_ModelWeights.csv")  %>% 
+  left_join(PC1_modelweights %>% select(Gene, Multipotency_Score = Weight)) %>% 
+  replace(is.na(.), 0) 
+
+modelweights_withMultipotency %>% write_csv("DevState_Lasso_ModelWeights_withMultipotencyScore_May2024.csv")
+```
+
+
+```{r}
+calculate_DevState_scores = function(query, modelweights, scale = TRUE, sampleID = 'Patient'){
+  
+  # Check for overlap with model genes and query genes
+  querygenes <- rownames(query)
+  modelweights_missing <- sum(!(modelweights$Gene %in% querygenes))
+  # check for missing genes
+  if(modelweights_missing > 0){
+    print(paste0('Warning: ', modelweights_missing, ' genes from Dev State models are missing from query dataset'))
+  }
+  
+  # filter model weights
+  modelweights <- modelweights %>% filter(Gene %in% querygenes)
+  modelweights_mat <- modelweights %>% column_to_rownames('Gene') %>% data.matrix()
+  
+  # multiply query by Dev State lasso weights
+  scored <- (t(query[modelweights$Gene,]) %*% modelweights_mat) %>% data.matrix() 
+  if(scale == TRUE){
+    scored <- scale(scored)
+  }
+  scored <- scored %>% as.data.frame() %>% rownames_to_column(sampleID) 
+  
+  return(scored)
+}
+```
+
+
+## Calculate in bulk2046 and validate
+
+```{r}
+bulk2046 <- bulk2046 %>% 
+  left_join( calculate_DevState_scores(bulk2046_vst, modelweights_withMultipotency, scale = T, sampleID = 'SampleID_old') %>% select(SampleID_old, Multipotency_Score) ) 
+bulk2046
+```
+
+```{r}
+# Load repeated nested cross-validation (10-fold, 10 repeats) results 
+CVoutput <- read_csv('RepNestedCV_results_PC1multipotency_Regression.csv')
+PC1model_CVplot <- CVoutput %>% filter(lambda == 'lambda.1se') %>%
+  mutate(model = '') %>% 
+  ggplot(aes(x = model, y = pearson^2)) +
+  ylab('Pearson Correlation with PC1') + xlab('PC1 Models\n(Cross-Validation)') + 
+  geom_boxplot(outlier.size=0) + ggbeeswarm::geom_quasirandom(width=0.32) + theme_pubr() + theme(axis.ticks.x = element_blank())
+
+# Get correlation across full cohort
+bulk2046_PC1_Multipotency_plot <- bulk2046 %>% 
+  ggplot(aes(x = Multipotency_Score, y = PC1)) + 
+  xlab('B-ALL Multipotency Score (99 Genes)') + 
+  geom_point(size=0.7) + stat_cor(r.digits = 4) + theme_pubr()
+
+PC1model_CVplot + bulk2046_PC1_Multipotency_plot + plot_layout(widths=c(0.25,0.75))
+ggsave('BALL_MultipotencyScore_Figures/MultipotencyScore_PC1_ModelPerformance.pdf', height = 4.5, width=8)
+```
+
+
+```{r}
+bulk2046 %>% write_csv('BALL2046_DevState_Updated_May2024_AZ.csv')
+bulk2046
+```
+
+
+# Multipotency Score in Normal B cell Development
+
+```{r}
+library(DESeq2)
+BDev_pseudobulk <- readRDS('../../BDevelopment_Pseudobulk_byTissue_CellType.rds')
+# vst normalize
+BDev_pseudobulk[['RNA']]@data <- DESeqDataSetFromMatrix(BDev_pseudobulk[['RNA']]@counts, colData = BDev_pseudobulk@meta.data, design = ~1) %>% vst() %>% assay()
+BDev_pseudobulk[['RNA']]@data[1:10,1:5]
+```
+
+```{r}
+# Calculate Multipotency score
+BDev_pseudobulk@meta.data <- bind_cols(BDev_pseudobulk@meta.data, 
+                                       calculate_DevState_scores(BDev_pseudobulk[['RNA']]@data, modelweights_withMultipotency, scale = T, sampleID = 'Sample') %>% column_to_rownames('Sample'))
+BDev_pseudobulk@meta.data
+```
+
+```{r}
+BDev_pseudobulk@meta.data %>% 
+  filter(nCells >= 50) %>% 
+  mutate(BDevelopment_CellType_Comprehensive = BDevelopment_CellType_Comprehensive %>% 
+           factor(levels = c('HSC/MPP', 'MPP-MyLy', 'LMPP', 'Early GMP', 'Pre-pDC', 'Pre-pDC Cycling', 'pDC', 'MLP', 
+                             'CLP', 'Pre-Pro-B', 'Pro-B VDJ', 'Pro-B Cycling 1', 'Pro-B Cycling 2',  # 'Pre-Pro-B Cycling', 
+                             'Large Pre-B 1', 'Large Pre-B 2', 'Small Pre-B', 'Immature B', 'Mature B'))) %>%  #Mature B Cycling
+  mutate(`Developmental State` = ifelse(BDevelopment_CellType_Comprehensive %in% c('HSC/MPP', 'MPP-MyLy', 'LMPP'), 'HSC/MPP',
+                                        ifelse(BDevelopment_CellType_Comprehensive %in% c('Early GMP'), 'Myeloid Progenitor',
+                                               ifelse(BDevelopment_CellType_Comprehensive %in% c('Pre-pDC', 'Pre-pDC Cycling', 'pDC'), 'Pre-pDC',
+                                                   ifelse(BDevelopment_CellType_Comprehensive %in% c('MLP', 'CLP', 'Pre-Pro-B', 'Pre-Pro-B Cycling'), 'Early Lymphoid',
+                                                          ifelse(BDevelopment_CellType_Comprehensive %in% c('Pro-B VDJ', 'Pro-B Cycling 1', 'Pro-B Cycling 2'), 'Pro-B',
+                                                                 ifelse(BDevelopment_CellType_Comprehensive %in% c('Large Pre-B 1', 'Large Pre-B 2', 'Small Pre-B'), 'Pre-B',
+                                                                        ifelse(BDevelopment_CellType_Comprehensive %in% c('Immature B', 'Mature B', 'Mature B Cycling'), 'Mature B', 'NA'))))))) %>% 
+           factor(levels = c('HSC/MPP', 'Myeloid Progenitor', 'Pre-pDC', 'Early Lymphoid', 'Pro-B', 'Pre-B', 'Mature B'))) %>% 
+  filter(!is.na(BDevelopment_CellType_Comprehensive)) %>% 
+  ggplot(aes(x = BDevelopment_CellType_Comprehensive, y = Multipotency_Score, fill = `Developmental State`)) + 
+  geom_hline(yintercept=0, lty=5, size=0.5, alpha=0.8) + geom_boxplot(outlier.size=0.3) + 
+  theme_pubr(legend='right') + theme(axis.text.x = element_text(angle=90, hjust=1, size=10.5)) + 
+  xlab('\nNormal Population (B Cell Development Atlas)') + ylab('B-ALL Multipotency Score') + 
+  scale_fill_brewer(palette = 'Dark2')
+
+ggsave('BALL_MultipotencyScore_Figures/MultipotencyScore_Normal_BDev_pseudobulkScores.pdf', height = 5, width=9.5)
+```
+
+# Evaluate 99-gene Multipotency Score within 2046 cohort 
+
+```{r}
+bulk2046 <- read_csv('BALL2046_DevState_Updated_May2024_AZ.csv')
+```
+
+## Evaluate on Clinical Risk Group 
+
+```{r}
+bulk2046$Risk_Group %>% table()
+```
+
+
+```{r}
+p <- bulk2046 %>% 
+    select(Patient, Risk_Group, Multipotency_Score) %>% pivot_longer(-c(Patient, Risk_Group), names_to='Lineage', values_to='Score') %>%
+    filter(Risk_Group != 'NA') %>% mutate(Risk_Group = Risk_Group %>% factor(levels = c('Childhood SR', 'Childhood HR', 'AYA', 'Adult'))) %>% 
+    filter(Lineage %in% c('Multipotency_Score')) %>% 
+    mutate(Lineage = Lineage %>% str_replace('_', ' ')) %>% 
+    ggplot(aes(x = Risk_Group, y = Score, fill = Risk_Group)) + 
+    geom_hline(yintercept = 0, alpha = 0.7, lty = 2) + 
+    geom_boxplot(outlier.size=0) + ggbeeswarm::geom_quasirandom(aes(size = Risk_Group), width=0.3) + 
+    facet_wrap(.~Lineage, scales='free', ncol=5) + 
+    theme_pubr(legend = 'none') + 
+    scale_fill_brewer(palette = 'Dark2') + 
+    theme(strip.text.x = element_text(size = 14), axis.text.x = element_text(size = 11), axis.text.y = element_text(size = 12), axis.title = element_text(size = 12.5)) + 
+    scale_size_manual(values = c(0.2, 0.2, 0.3, 0.3)) + xlab('\nClinical Risk Group') + ylab('B-ALL Multipotency Score') + 
+    stat_compare_means(comparisons = list(c('Childhood SR', 'Childhood HR'), c('Childhood HR', 'AYA'), c('AYA', 'Adult')))
+
+p
+ggsave('BALL_MultipotencyScore_Figures/RiskGroup_2022patients_Multipotency_Score.pdf', device = 'pdf', height = 5.5, width = 4.8)
+```
+
+```{r}
+# Patients with Age data
+sum(!is.na(bulk2046$Age)) 
+```
+
+
+```{r}
+p <- bulk2046 %>% select(Age, Multipotency_Score) %>% pivot_longer(-Age) %>% 
+    mutate(`Developmental State` = name %>% str_replace('_',' ')) %>%
+    #mutate(`Developmental State` = ifelse(name %>% str_detect('Early'), 'Early Lymphoid',
+    #                                     ifelse(name %>% str_detect('Pro_B'), 'Pro-B', 'NA'))) %>% 
+    ggplot(aes(x = Age, y = value, color = `Developmental State`)) + 
+    geom_smooth(method = 'loess', se = T, size = 2) + #geom_point(size = 0.3, alpha = 0.5) + 
+    scale_x_sqrt(breaks = c(1, 5, 10, 15, 20, 30, 40, 50, 60, 70, 80)) + 
+    scale_color_brewer(palette = 'Dark2') + 
+    geom_hline(yintercept = 0, lty = 3) + 
+    geom_vline(xintercept = 1, lty = 3) + geom_vline(xintercept = 15, lty = 3) + geom_vline(xintercept = 40, lty = 3) + 
+    xlab('Age at Diagnosis (Years)') + ylab('B-ALL Multipotency Score') +
+    ggpubr::theme_pubr(legend = 'top') + theme(legend.title = element_blank())
+        
+p
+ggsave('BALL_MultipotencyScore_Figures/Age_vs_MultipotencyScore_2019patients.pdf', height = 4.2, width = 5.5)
+```
+
+
+```{r}
+p <- bulk2046 %>% select(Age, Multipotency_Score) %>% pivot_longer(-Age) %>% 
+    mutate(`Developmental State` = name %>% str_replace('_',' ')) %>%
+    #mutate(`Developmental State` = ifelse(name %>% str_detect('Early'), 'Early Lymphoid',
+    #                                     ifelse(name %>% str_detect('Pro_B'), 'Pro-B', 'NA'))) %>% 
+    ggplot(aes(x = Age, y = value, color = `Developmental State`)) + 
+    geom_smooth(method = 'loess', se = T, size = 2) + #geom_point(size = 0.3, alpha = 0.5) + 
+    scale_x_sqrt(breaks = c(1, 5, 10, 15, 20, 30, 40, 50, 60, 70, 80)) + 
+    scale_color_brewer(palette = 'Dark2') + 
+    geom_hline(yintercept = 0, lty = 3) + 
+    geom_vline(xintercept = 1, lty = 3) + geom_vline(xintercept = 18, lty = 3) + geom_vline(xintercept = 40, lty = 3) + 
+    xlab('Age at Diagnosis (Years)') + ylab('B-ALL Multipotency Score') +
+    ggpubr::theme_pubr(legend = 'top') + theme(legend.title = element_blank())
+        
+p
+#ggsave('BALL_MultipotencyScore_Figures/Age_vs_MultipotencyScore_2019patients.pdf', height = 4.2, width = 5.5)
+```
+
+
+## Evaluate on MRD 
+
+```{r}
+# Formatted and pivoted
+bulk2046_MRD <- bulk2046 %>% 
+  select(Patient, MRD_D29_2cat, MRD_D29_3cat, MRD_D29_5cat,  MRD_D46_2cat, 
+         c('HSC_MPP', 'Early_Lymphoid', 'Myeloid_Prog', 'Pre_pDC', 'Pro_B', 'Pre_B', 'Mature_B', 'T_NK', 'Monocyte', 'Erythroid',
+           'PC1', 'Multipotency_Score')) %>% 
+  mutate(MRD_D29_2cat = factor(MRD_D29_2cat, levels = c('Negative\n< 0.01%', 'Positive\n> 0.01%')), 
+         MRD_D29_3cat = factor(MRD_D29_3cat, levels = c('< 0.01%', '0.01 - 1%',  '> 1%')), 
+         MRD_D29_5cat = factor(MRD_D29_5cat, levels = c('< 0.01%', '0.01 - 0.1%', '0.1 - 1%', '1 - 10%', '> 10%'))) %>% 
+  pivot_longer(-c(Patient, MRD_D29_2cat, MRD_D29_3cat, MRD_D29_5cat,  MRD_D46_2cat), names_to = 'Lineage', values_to = 'Score') %>% 
+  select(Patient, Lineage, Score, everything()) %>% 
+  mutate(Lineage = Lineage %>% #str_replace('NMF.*_', '') %>% 
+                factor(levels = c('Multipotency_Score', 'PC1', 'HSC_MPP', 'Early_Lymphoid', 'Myeloid_Prog', 'Pre_pDC', 'Pro_B', 'Pre_B', 
+                                  'Mature_B', 'T_NK', 'Monocyte', 'Erythroid'))) %>% 
+  arrange(Lineage)
+
+bulk2046_MRD
+```
+
+```{r}
+p <- bulk2046_MRD %>% 
+    filter(MRD_D29_5cat != 'NA') %>% #mutate(Score = ifelse(Lineage %in% c('PC1_a', 'PC1_b', 'PC1_c'), -Score, Score)) %>% 
+    filter(Lineage %in% c('Multipotency_Score')) %>% 
+    mutate(Lineage = Lineage %>% str_replace('_', ' ')) %>% 
+    ggplot(aes(x = MRD_D29_5cat, y = Score, fill = MRD_D29_5cat)) + 
+    geom_hline(yintercept = 0, alpha = 0.7, lty = 2) + 
+    geom_boxplot(outlier.size=0) + ggbeeswarm::geom_quasirandom(aes(size = MRD_D29_5cat), width=0.3) + 
+    facet_wrap(.~Lineage, scales='free', ncol=5) + 
+    theme_pubr(legend = 'none') + 
+    scale_fill_manual(values = c('#7CA987', '#D9D17D', '#DAA15E', '#FF7F50', '#D43F00')) + 
+    theme(strip.text.x = element_text(size = 14), axis.text.x = element_text(size = 11), axis.text.y = element_text(size = 12), axis.title = element_text(size = 12.5)) + 
+    scale_size_manual(values = c(0.15, 0.4, 0.4, 0.5, 0.5)) + xlab('\nResidual Disease - Day 29 Induction') + ylab('B-ALL Multipotency Score') + 
+    stat_compare_means(comparisons = list(c('< 0.01%', '0.01 - 0.1%'), c('< 0.01%', '0.1 - 1%'), c('< 0.01%', '1 - 10%'), c('< 0.01%', '> 10%')))
+
+p
+ggsave('BALL_MultipotencyScore_Figures/MRD_levels_794patients_Multipotency_Score.pdf', device = 'pdf', height = 5.5, width = 4.8)
+```
+
+
+```{r}
+p <- bulk2046_MRD %>% 
+    filter(MRD_D29_2cat != 'NA') %>% 
+    filter(Lineage %in% c('Multipotency_Score')) %>% 
+    mutate(Lineage = Lineage %>% str_replace('_', ' ')) %>% 
+    ggplot(aes(x = MRD_D29_2cat, y = Score, fill = MRD_D29_2cat)) + 
+    geom_hline(yintercept = 0, alpha = 0.7, lty = 2) + 
+    geom_boxplot(outlier.size=0) + ggbeeswarm::geom_quasirandom(size = 0.25, width=0.3) + 
+    facet_wrap(.~Lineage, scales='free', ncol=5) + 
+    theme_pubr(legend = 'none') + 
+    scale_fill_manual(values = c('#7CA987', '#D97A6D')) + 
+    theme(strip.text.x = element_text(size = 13.5), axis.text.x = element_text(size = 12), axis.text.y = element_text(size = 12), axis.title = element_text(size = 12.5)) + 
+    xlab('\nResidual Disease - Day 29 Induction') + ylab('B-ALL Multipotency Score') + 
+    stat_compare_means(comparisons = list(c('Negative\n< 0.01%', 'Positive\n> 0.01%')))
+
+p
+ggsave('BALL_MultipotencyScore_Figures/MRD_Status_1197patients_Multipotency_Score.pdf', device = 'pdf', height = 5, width = 4)
+```
+
+
+## Evaluate on Survival Outcomes 
+
+### Pediatric Survival 
+
+First in Pediatric B-ALL 
+Survival outcomes are available for 1,039 pediatric B-ALL patients within the St Jude and COG cohorts.
+  Note that the COG patient samples subject for RNA-seq were preselected to be high risk and consequentially these COG outcomes are worse than the "real world"
+
+```{r}
+# Keep pediatric cohorts (COG and St Jude)
+bulk2046_pediatric <- bulk2046 %>% filter(Institute %in% c('St Jude', 'COG')) %>%
+    filter(!is.na(oscensor) & !is.na(efscensor)) %>% 
+    mutate(Risk_Group = factor(Risk_Group, levels = c('Childhood SR', 'Childhood HR', 'AYA')),  # clinical risk group
+           GenomicRisk_pediatric = factor(GenomicRisk_pediatric, levels = c('Unclassified', 'Favorable', 'Intermediate', 'Unfavorable')))     # genomic risk group
+
+bulk2046_pediatric
+```
+
+Loop through developmental states and perform univariable + multivariable cox regression
+
+```{r}
+# dataframe to store results
+lineage_survival_ped <- data.frame()
+devstates <- c('Multipotency_Score', 'HSC_MPP', 'Myeloid_Prog', 'Pre_pDC', 'Early_Lymphoid', 'Pro_B', 'Pre_B', 'Mature_B', 'T_NK', 'Monocyte', 'Erythroid')
+
+for(lineage in devstates){
+
+    # Univariable model 
+    mod_os <- coxph(Surv(ostime, oscensor) ~ get(lineage), bulk2046_pediatric)
+    mod_efs <- coxph(Surv(efstime, efscensor) ~ get(lineage), bulk2046_pediatric)
+
+    lineage_survival_ped <- lineage_survival_ped %>% bind_rows(
+        summary(mod_os)$coefficients %>% data.frame() %>% dplyr::rename(HR = 'exp.coef.', HRse = 'se.coef.', statistic = 'z', pvalue = 'Pr...z..') %>% 
+            rownames_to_column('variable') %>% mutate(Lineage = lineage, multivariable = FALSE, survival = 'OS') %>% 
+            mutate(HR_upr = HR + 1.96*HRse, HR_lwr = HR - 1.96*HRse, 
+                   n_patients = mod_os$n) %>% 
+            filter(variable %>% str_detect('lineage')) %>% select(Lineage, survival, multivariable, HR, HRse, HR_lwr, HR_upr, n_patients, statistic, pvalue)
+    ) %>% bind_rows(
+        summary(mod_efs)$coefficients %>% data.frame() %>% dplyr::rename(HR = 'exp.coef.', HRse = 'se.coef.', statistic = 'z', pvalue = 'Pr...z..') %>% 
+            rownames_to_column('variable') %>% mutate(Lineage = lineage, multivariable = FALSE, survival = 'EFS') %>% 
+            mutate(HR_upr = HR + 1.96*HRse, HR_lwr = HR - 1.96*HRse, 
+                   n_patients = mod_efs$n) %>% 
+            filter(variable %>% str_detect('lineage')) %>% select(Lineage, survival, multivariable, HR, HRse, HR_lwr, HR_upr, n_patients, statistic, pvalue)
+    )
+    
+    # Multivariable model 
+    mod_multi_os <- coxph(Surv(ostime, oscensor) ~ get(lineage) + Risk_Group + GenomicRisk_pediatric + Sex + Age + WBC, bulk2046_pediatric)
+    mod_multi_efs <- coxph(Surv(efstime, efscensor) ~ get(lineage) + Risk_Group + GenomicRisk_pediatric + Sex + Age + WBC, bulk2046_pediatric)
+    
+    # Create baseline models without dev state abundance to compare against by nested LRT
+    mod_multi_os_0 <- coxph(Surv(ostime, oscensor) ~ Risk_Group + GenomicRisk_pediatric + Sex + Age + WBC, bulk2046_pediatric)
+    mod_multi_efs_0 <- coxph(Surv(efstime, efscensor) ~ Risk_Group + GenomicRisk_pediatric + Sex + Age + WBC , bulk2046_pediatric)
+
+    lineage_survival_ped <- lineage_survival_ped %>% bind_rows(
+        summary(mod_multi_os)$coefficients %>% data.frame() %>% dplyr::rename(HR = 'exp.coef.', HRse = 'se.coef.', statistic = 'z', pvalue = 'Pr...z..') %>% 
+            rownames_to_column('variable') %>% mutate(Lineage = lineage, multivariable = TRUE, survival = 'OS') %>% 
+            mutate(HR_upr = HR + 1.96*HRse, HR_lwr = HR - 1.96*HRse, 
+                   n_patients = mod_multi_os$n) %>% 
+            filter(variable %>% str_detect('lineage')) %>% select(Lineage, survival, multivariable, HR, HRse, HR_lwr, HR_upr, n_patients, statistic, pvalue) %>% 
+            # nested LRT: how much prognostic info does dev state add beyond baseline model?
+            mutate(pvalue_nestedLRT = anova(mod_multi_os, mod_multi_os_0)[2,'P(>|Chi|)'])
+        
+    ) %>% bind_rows(
+      
+        summary(mod_multi_efs)$coefficients %>% data.frame() %>% dplyr::rename(HR = 'exp.coef.', HRse = 'se.coef.', statistic = 'z', pvalue = 'Pr...z..') %>% 
+            rownames_to_column('variable') %>% mutate(Lineage = lineage, multivariable = TRUE, survival = 'EFS') %>% 
+            mutate(HR_upr = HR + 1.96*HRse, HR_lwr = HR - 1.96*HRse, 
+                   n_patients = mod_multi_efs$n) %>%
+            filter(variable %>% str_detect('lineage')) %>% select(Lineage, survival, multivariable, HR, HRse, HR_lwr, HR_upr, n_patients, statistic, pvalue) %>% 
+            # nested LRT: how much prognostic info does dev state add beyond baseline model?
+            mutate(pvalue_nestedLRT = anova(mod_multi_efs, mod_multi_efs_0)[2,'P(>|Chi|)'])
+        
+    )
+}
+
+lineage_survival_ped 
+```
+
+
+```{r, fig.height = 5, fig.width = 6}
+surv_ped_uni <- lineage_survival_ped %>% mutate(logpval = ifelse(HR > 1, -log10(pvalue), log10(pvalue))) %>% 
+    mutate(Association = ifelse(HR_lwr > 1 & pvalue < 0.05, 'Adverse', ifelse(HR_upr < 1 & pvalue < 0.05, 'Favorable', 'N.S.'))) %>%
+    filter(multivariable == FALSE) %>% 
+    mutate(survname = ifelse(survival == 'OS', 'Overall Survival', ifelse(survival == 'EFS', 'Event-Free Survival', 'NA')) %>% 
+           factor(levels = c('Overall Survival', 'Event-Free Survival'))) %>%
+    mutate(Lineage = ifelse(Lineage %in% c('Myeloid_Prog', 'Early_Lymphoid', 'Mature_B', 'Multipotency_Score'), Lineage %>% str_replace('Prog', 'Progenitor') %>% str_replace('_', ' '), 
+                            Lineage %>% str_replace('_MPP', '/MPP') %>% str_replace('_NK', '/NK') %>% str_replace('_', '-')) %>% 
+             factor(levels = c('Multipotency Score', 'HSC/MPP', 'Myeloid Progenitor', 'Pre-pDC', 'Early Lymphoid', 'Pro-B', 'Pre-B'))) %>% filter(Lineage != 'NA') %>%
+    ggplot(aes(x = Lineage, y = HR, ymax = HR_upr, ymin = HR_lwr, color = Association)) + 
+    geom_hline(yintercept = 1, lty = 2, size = 0.5, alpha = 1, color = 'darkgrey') + 
+    geom_pointrange(size=0.8, position=position_dodge(width=c(0))) +
+    facet_wrap(.~survname, ncol=1, scales = 'free_x') + 
+    scale_color_manual(values=c('indianred4', 'darkgreen', '#666666')) +   
+    theme_pubr(legend = 'right') + scale_y_continuous(breaks = scales::pretty_breaks(n=8), limits = c(0.3,1.8)) + theme(axis.title.x= element_blank()) + 
+    ylab('Univariable Hazard Ratio  (per 1SD increase in abundance)') + 
+    theme(axis.text.x = element_text(size = 10.5, angle = 90, hjust = 1, vjust = 0.5), strip.text.x = element_text(size=11), axis.text.y = element_text(size=10.5),
+          title = element_text(size = 10.5)) + 
+    ggtitle('Univariable Survival (n = 1039)')
+    
+surv_ped_multi <- lineage_survival_ped %>% mutate(logpval = ifelse(HR > 1, -log10(pvalue), log10(pvalue))) %>% 
+    mutate(Association = ifelse(HR_lwr > 1 & pvalue_nestedLRT < 0.05, 'Adverse', ifelse(HR_upr < 1 & pvalue_nestedLRT < 0.05, 'Favorable', 'N.S.'))) %>%
+    filter(multivariable == TRUE) %>% 
+    mutate(survname = ifelse(survival == 'OS', 'Overall Survival', ifelse(survival == 'EFS', 'Event-Free Survival', 'NA')) %>% 
+           factor(levels = c('Overall Survival', 'Event-Free Survival'))) %>%
+    mutate(Lineage = ifelse(Lineage %in% c('Myeloid_Prog', 'Early_Lymphoid', 'Mature_B', 'Multipotency_Score'), Lineage %>% str_replace('Prog', 'Progenitor') %>% str_replace('_', ' '), 
+                            Lineage %>% str_replace('_MPP', '/MPP') %>% str_replace('_NK', '/NK') %>% str_replace('_', '-')) %>% 
+             factor(levels = c('Multipotency Score','HSC/MPP', 'Myeloid Progenitor', 'Pre-pDC', 'Early Lymphoid', 'Pro-B', 'Pre-B'))) %>% filter(Lineage != 'NA') %>%
+    ggplot(aes(x = Lineage, y = HR, ymax = HR_upr, ymin = HR_lwr, color = Association)) + 
+    geom_hline(yintercept = 1, lty = 2, size = 0.5, alpha = 1, color = 'darkgrey') + 
+    geom_pointrange(size=0.8, position=position_dodge(width=c(0))) +
+    facet_wrap(.~survname, ncol=1, scales = 'free_x') + 
+    scale_color_manual(values=c('indianred4', 'darkgreen', '#666666')) +   
+    theme_pubr(legend = 'right') + scale_y_continuous(breaks = scales::pretty_breaks(n=8), limits = c(0.3,1.8)) + theme(axis.title.x= element_blank()) + 
+    ylab('Multivariable Hazard Ratio  (per 1SD increase in abundance)') + 
+    theme(axis.text.x = element_text(size = 10.5, angle = 90, hjust = 1, vjust = 0.5), strip.text.x = element_text(size=11), axis.text.y = element_text(size=10.5),
+          title = element_text(size = 10.5)) + 
+    ggtitle('Multivariable Survival (n = 1010)')
+    
+ggsave(plot = surv_ped_uni, filename = 'BALL_survival_figures_final/Survival_pediatric_Univariable_BDevOnly_HazardRatios.pdf', device = 'pdf', height = 7.5, width = 4.5)
+ggsave(plot = surv_ped_multi, filename = 'BALL_survival_figures_final/Survival_pediatric_Multivariable_BDevOnly_HazardRatios.pdf', device = 'pdf', height = 7.5, width = 4.5)
+
+surv_ped_uni | surv_ped_multi
+```
+
+```{r}
+bulk2046_pediatric$MRD_D29_2cat %>% table()
+```
+
+
+### Pediatric Survival; MRD negative only
+Repeat Pediatric Analysis within MRD negative patients 
+
+```{r}
+bulk2046_pediatric_MRDneg <- bulk2046_pediatric %>% filter(MRD_D29_2cat == 'Negative\n< 0.01%')
+
+# dataframe to store results
+lineage_survival_ped_MRDneg <- data.frame()
+devstates <- c('Multipotency_Score', 'HSC_MPP', 'Myeloid_Prog', 'Pre_pDC', 'Early_Lymphoid', 'Pro_B', 'Pre_B', 'Mature_B', 'T_NK', 'Monocyte', 'Erythroid')
+
+for(lineage in devstates){
+
+    # Multivariable model 
+    mod_multi_os <- coxph(Surv(ostime, oscensor) ~ get(lineage) + Risk_Group + GenomicRisk_pediatric + Sex + Age + WBC, bulk2046_pediatric_MRDneg)
+    mod_multi_efs <- coxph(Surv(efstime, efscensor) ~ get(lineage) + Risk_Group + GenomicRisk_pediatric + Sex + Age + WBC , bulk2046_pediatric_MRDneg)
+    
+    # Create baseline models without dev state abundance to compare against by nested LRT
+    mod_multi_os_0 <- coxph(Surv(ostime, oscensor) ~ Risk_Group + GenomicRisk_pediatric + Sex + Age + WBC, bulk2046_pediatric_MRDneg)
+    mod_multi_efs_0 <- coxph(Surv(efstime, efscensor) ~ Risk_Group + GenomicRisk_pediatric + Sex + Age + WBC , bulk2046_pediatric_MRDneg)
+
+    lineage_survival_ped_MRDneg <- lineage_survival_ped_MRDneg %>% bind_rows(
+        summary(mod_multi_os)$coefficients %>% data.frame() %>% dplyr::rename(HR = 'exp.coef.', HRse = 'se.coef.', statistic = 'z', pvalue = 'Pr...z..') %>% 
+            rownames_to_column('variable') %>% mutate(Lineage = lineage, multivariable = TRUE, survival = 'OS') %>% 
+            mutate(HR_upr = HR + 1.96*HRse, HR_lwr = HR - 1.96*HRse, 
+                   n_patients = mod_multi_os$n) %>% 
+            filter(variable %>% str_detect('lineage')) %>% select(Lineage, survival, multivariable, HR, HRse, HR_lwr, HR_upr, n_patients, statistic, pvalue) %>% 
+            # nested LRT: how much prognostic info does dev state add beyond baseline model?
+            mutate(pvalue_nestedLRT = anova(mod_multi_os, mod_multi_os_0)[2,'P(>|Chi|)'])
+        
+    ) %>% bind_rows(
+      
+        summary(mod_multi_efs)$coefficients %>% data.frame() %>% dplyr::rename(HR = 'exp.coef.', HRse = 'se.coef.', statistic = 'z', pvalue = 'Pr...z..') %>% 
+            rownames_to_column('variable') %>% mutate(Lineage = lineage, multivariable = TRUE, survival = 'EFS') %>% 
+            mutate(HR_upr = HR + 1.96*HRse, HR_lwr = HR - 1.96*HRse, 
+                   n_patients = mod_multi_efs$n) %>%
+            filter(variable %>% str_detect('lineage')) %>% select(Lineage, survival, multivariable, HR, HRse, HR_lwr, HR_upr, n_patients, statistic, pvalue) %>% 
+            # nested LRT: how much prognostic info does dev state add beyond baseline model?
+            mutate(pvalue_nestedLRT = anova(mod_multi_efs, mod_multi_efs_0)[2,'P(>|Chi|)'])
+        
+    )
+}
+
+lineage_survival_ped_MRDneg 
+```
+
+
+```{r, fig.height = 5, fig.width = 3}
+surv_ped_multi_MRDneg <- lineage_survival_ped_MRDneg %>% mutate(logpval = ifelse(HR > 1, -log10(pvalue), log10(pvalue))) %>% 
+    mutate(Association = ifelse(HR_lwr > 1 & pvalue_nestedLRT < 0.05, 'Adverse', ifelse(HR_upr < 1 & pvalue_nestedLRT < 0.05, 'Favorable', 'N.S.'))) %>%
+    filter(multivariable == TRUE) %>% 
+    mutate(survname = ifelse(survival == 'OS', 'Overall Survival', ifelse(survival == 'EFS', 'Event-Free Survival', 'NA')) %>% 
+           factor(levels = c('Overall Survival', 'Event-Free Survival'))) %>%
+    mutate(Lineage = ifelse(Lineage %in% c('Myeloid_Prog', 'Early_Lymphoid', 'Mature_B', 'Multipotency_Score'), Lineage %>% str_replace('Prog', 'Progenitor') %>% str_replace('_', ' '), 
+                            Lineage %>% str_replace('_MPP', '/MPP') %>% str_replace('_NK', '/NK') %>% str_replace('_', '-')) %>% 
+             factor(levels = c('Multipotency Score','HSC/MPP', 'Myeloid Progenitor', 'Pre-pDC', 'Early Lymphoid', 'Pro-B', 'Pre-B'))) %>% filter(Lineage != 'NA') %>%
+    ggplot(aes(x = Lineage, y = HR, ymax = HR_upr, ymin = HR_lwr, color = Association)) + 
+    geom_hline(yintercept = 1, lty = 2, size = 0.5, alpha = 1, color = 'darkgrey') + 
+    geom_pointrange(size=0.8, position=position_dodge(width=c(0))) +
+    facet_wrap(.~survname, ncol=1, scales = 'free_x') + 
+    scale_color_manual(values=c('indianred4', 'darkgreen', '#666666')) +   
+    theme_pubr(legend = 'right') + scale_y_continuous(breaks = scales::pretty_breaks(n=8), limits = c(0.2,2.1)) + theme(axis.title.x= element_blank()) + 
+    ylab('Multivariable Hazard Ratio  (per 1SD increase in abundance)') + 
+    theme(axis.text.x = element_text(size = 10.5, angle = 90, hjust = 1, vjust = 0.5), strip.text.x = element_text(size=11), axis.text.y = element_text(size=10.5),
+          title = element_text(size = 10.5)) + 
+    ggtitle('Multivariable Survival\n(MRD negative patients; n = 649)')
+    
+#ggsave(plot = surv_ped_uni, filename = 'BALL_survival_figures_final/Survival_pediatric_Univariable_BDevOnly_HazardRatios.pdf', device = 'pdf', height = 7.5, width = 4.5)
+#ggsave(plot = surv_ped_multi_MRDneg, filename = 'BALL_survival_figures_final/Survival_pediatric_Multivariable_BDevOnly_HazardRatios_MRDnegative.pdf', device = 'pdf', height = 7.5, width = 4.5)
+
+surv_ped_multi_MRDneg
+```
+
+### Adult Survival 
+
+324 adult B-ALL patients with survival data 
+
+```{r}
+# Use adult cohort ECOG
+bulk2046_adult <- bulk2046 %>% 
+    filter(!Institute %in% c('COG', 'St Jude')) %>% 
+    filter(!is.na(oscensor) | !is.na(efscensor)) %>% 
+    mutate(Risk_Group = factor(Risk_Group, levels = c('AYA', 'Adult')),  # clinical risk group
+           GenomicRisk_adult = factor(GenomicRisk_adult, levels = c('Unclassified', 'Favorable', 'Intermediate', 'Unfavorable')))     # genomic risk group
+
+bulk2046_adult
+```
+
+Loop through developmental states and perform univariable + multivariable cox regression
+
+```{r}
+# dataframe to store results
+lineage_survival_adult <- data.frame()
+devstates <- c('Multipotency_Score', 'HSC_MPP', 'Myeloid_Prog', 'Pre_pDC', 'Early_Lymphoid', 'Pro_B', 'Pre_B', 'Mature_B', 'T_NK', 'Monocyte', 'Erythroid')
+
+for(lineage in devstates){
+
+    # Univariable model stratifiying on institute and primary subtype
+    mod_os <- coxph(Surv(ostime, oscensor) ~ get(lineage), bulk2046_adult)
+    mod_efs <- coxph(Surv(efstime, efscensor) ~ get(lineage), bulk2046_adult)
+
+    lineage_survival_adult <- lineage_survival_adult %>% bind_rows(
+        summary(mod_os)$coefficients %>% data.frame() %>% dplyr::rename(HR = 'exp.coef.', HRse = 'se.coef.', statistic = 'z', pvalue = 'Pr...z..') %>% 
+            rownames_to_column('variable') %>% mutate(Lineage = lineage, multivariable = FALSE, survival = 'OS') %>% 
+            mutate(HR_upr = HR + 1.96*HRse, HR_lwr = HR - 1.96*HRse, 
+                   n_patients = mod_os$n) %>% 
+            filter(variable %>% str_detect('lineage')) %>% select(Lineage, survival, multivariable, HR, HRse, HR_lwr, HR_upr, n_patients, statistic, pvalue)
+    ) %>% bind_rows(
+        summary(mod_efs)$coefficients %>% data.frame() %>% dplyr::rename(HR = 'exp.coef.', HRse = 'se.coef.', statistic = 'z', pvalue = 'Pr...z..') %>% 
+            rownames_to_column('variable') %>% mutate(Lineage = lineage, multivariable = FALSE, survival = 'EFS') %>% 
+            mutate(HR_upr = HR + 1.96*HRse, HR_lwr = HR - 1.96*HRse, 
+                   n_patients = mod_efs$n) %>% 
+            filter(variable %>% str_detect('lineage')) %>% select(Lineage, survival, multivariable, HR, HRse, HR_lwr, HR_upr, n_patients, statistic, pvalue)
+    )
+    
+    # Multivariable model stratifiying on institute and primary subtype
+    mod_multi_os <- coxph(Surv(ostime, oscensor) ~ get(lineage) + Risk_Group + GenomicRisk_adult + Sex + Age + WBC, bulk2046_adult)
+    mod_multi_efs <- coxph(Surv(efstime, efscensor) ~ get(lineage) + Risk_Group + GenomicRisk_adult + Sex + Age + WBC, bulk2046_adult)
+    
+    # Create baseline models without dev state abundance to compare against by nested LRT
+    mod_multi_os_0 <- coxph(Surv(ostime, oscensor) ~ Risk_Group + GenomicRisk_adult + Sex + Age + WBC, bulk2046_adult)
+    mod_multi_efs_0 <- coxph(Surv(efstime, efscensor) ~ Risk_Group + GenomicRisk_adult + Sex + Age + WBC, bulk2046_adult)
+
+    lineage_survival_adult <- lineage_survival_adult %>% bind_rows(
+        summary(mod_multi_os)$coefficients %>% data.frame() %>% dplyr::rename(HR = 'exp.coef.', HRse = 'se.coef.', statistic = 'z', pvalue = 'Pr...z..') %>% 
+            rownames_to_column('variable') %>% mutate(Lineage = lineage, multivariable = TRUE, survival = 'OS') %>% 
+            mutate(HR_upr = HR + 1.96*HRse, HR_lwr = HR - 1.96*HRse, 
+                   n_patients = mod_multi_os$n) %>% 
+            filter(variable %>% str_detect('lineage')) %>% select(Lineage, survival, multivariable, HR, HRse, HR_lwr, HR_upr, n_patients, statistic, pvalue) %>% 
+            # nested LRT: how much prognostic info does dev state add beyond baseline model?
+            mutate(pvalue_nestedLRT = anova(mod_multi_os, mod_multi_os_0)[2,'P(>|Chi|)'])
+        
+    ) %>% bind_rows(
+      
+        summary(mod_multi_efs)$coefficients %>% data.frame() %>% dplyr::rename(HR = 'exp.coef.', HRse = 'se.coef.', statistic = 'z', pvalue = 'Pr...z..') %>% 
+            rownames_to_column('variable') %>% mutate(Lineage = lineage, multivariable = TRUE, survival = 'EFS') %>% 
+            mutate(HR_upr = HR + 1.96*HRse, HR_lwr = HR - 1.96*HRse, 
+                   n_patients = mod_multi_efs$n) %>% 
+            filter(variable %>% str_detect('lineage')) %>% select(Lineage, survival, multivariable, HR, HRse, HR_lwr, HR_upr, n_patients, statistic, pvalue) %>% 
+            # nested LRT: how much prognostic info does dev state add beyond baseline model?
+            mutate(pvalue_nestedLRT = anova(mod_multi_efs, mod_multi_efs_0)[2,'P(>|Chi|)'])
+        
+    )
+}
+
+lineage_survival_adult
+```
+
+
+```{r, fig.height = 5, fig.width = 6}
+surv_adult_uni <- lineage_survival_adult %>% mutate(logpval = ifelse(HR > 1, -log10(pvalue), log10(pvalue))) %>% 
+    mutate(Association = ifelse(HR_lwr > 1 & pvalue < 0.05, 'Adverse', ifelse(HR_upr < 1 & pvalue < 0.05, 'Favorable', 'N.S.'))) %>%
+    filter(multivariable == FALSE) %>% 
+    mutate(survname = ifelse(survival == 'OS', 'Overall Survival', ifelse(survival == 'EFS', 'Event-Free Survival', 'NA')) %>% 
+           factor(levels = c('Overall Survival', 'Event-Free Survival'))) %>%
+    mutate(Lineage = ifelse(Lineage %in% c('Myeloid_Prog', 'Early_Lymphoid', 'Mature_B', 'Multipotency_Score'), Lineage %>% str_replace('Prog', 'Progenitor') %>% str_replace('_', ' '), 
+                            Lineage %>% str_replace('_MPP', '/MPP') %>% str_replace('_NK', '/NK') %>% str_replace('_', '-')) %>% 
+             factor(levels = c('Multipotency Score', 'PC1', 'PC1-new', 'HSC/MPP', 'Myeloid Progenitor', 'Pre-pDC', 'Early Lymphoid', 'Pro-B', 'Pre-B'))) %>% filter(Lineage != 'NA') %>%
+    ggplot(aes(x = Lineage, y = HR, ymax = HR_upr, ymin = HR_lwr, color = Association)) + 
+    geom_hline(yintercept = 1, lty = 2, size = 0.5, alpha = 1, color = 'darkgrey') + 
+    geom_pointrange(size=0.8, position=position_dodge(width=c(0))) +
+    facet_wrap(.~survname, ncol=1, scales = 'free_x') + 
+    scale_color_manual(values=c('indianred4', 'darkgreen', '#666666')) +   
+    theme_pubr(legend = 'right') + scale_y_continuous(breaks = scales::pretty_breaks(n=8), limits = c(0.5,1.5)) + theme(axis.title.x= element_blank()) + 
+    ylab('Univariable Hazard Ratio  (per 1SD increase in abundance)') + 
+    theme(axis.text.x = element_text(size = 10.5, angle = 90, hjust = 1, vjust = 0.5), strip.text.x = element_text(size=11), axis.text.y = element_text(size=10.5),
+          title = element_text(size = 10.5)) + 
+    ggtitle('Univariable - Adult B-ALL (n = 324)')
+    
+surv_adult_multi <- lineage_survival_adult %>% mutate(logpval = ifelse(HR > 1, -log10(pvalue), log10(pvalue))) %>% 
+    mutate(Association = ifelse(HR_lwr > 1 & pvalue_nestedLRT < 0.05, 'Adverse', ifelse(HR_upr < 1 & pvalue_nestedLRT < 0.05, 'Favorable', 'N.S.'))) %>%
+    filter(multivariable == TRUE) %>% 
+    mutate(survname = ifelse(survival == 'OS', 'Overall Survival', ifelse(survival == 'EFS', 'Event-Free Survival', 'NA')) %>% 
+           factor(levels = c('Overall Survival', 'Event-Free Survival'))) %>%
+    mutate(Lineage = ifelse(Lineage %in% c('Myeloid_Prog', 'Early_Lymphoid', 'Mature_B', 'Multipotency_Score'), Lineage %>% str_replace('Prog', 'Progenitor') %>% str_replace('_', ' '), 
+                            Lineage %>% str_replace('_MPP', '/MPP') %>% str_replace('_NK', '/NK') %>% str_replace('_', '-')) %>% 
+             factor(levels = c('Multipotency Score', 'PC1', 'PC1-new', 'HSC/MPP', 'Myeloid Progenitor', 'Pre-pDC', 'Early Lymphoid', 'Pro-B', 'Pre-B'))) %>% filter(Lineage != 'NA') %>%
+    ggplot(aes(x = Lineage, y = HR, ymax = HR_upr, ymin = HR_lwr, color = Association)) + 
+    geom_hline(yintercept = 1, lty = 2, size = 0.5, alpha = 1, color = 'darkgrey') + 
+    geom_pointrange(size=0.8, position=position_dodge(width=c(0))) +
+    facet_wrap(.~survname, ncol=1, scales = 'free_x') + 
+    scale_color_manual(values=c('#666666')) +   
+    theme_pubr(legend = 'right') + scale_y_continuous(breaks = scales::pretty_breaks(n=8), limits = c(0.5,1.5)) + theme(axis.title.x= element_blank()) + 
+    ylab('Multivariable Hazard Ratio  (per 1SD increase in abundance)') + 
+    theme(axis.text.x = element_text(size = 10.5, angle = 90, hjust = 1, vjust = 0.5), strip.text.x = element_text(size=11), axis.text.y = element_text(size=10.5),
+          title = element_text(size = 10.5)) + 
+    ggtitle('Multivariable - Adult B-ALL (n = 312)')
+    
+#ggsave(plot = surv_adult_uni, filename = 'BALL_survival_figures_final/Survival_adult_Univariable_BDevOnly_HazardRatios.pdf', device = 'pdf', height = 7.5, width = 4.5)
+#ggsave(plot = surv_adult_multi, filename = 'BALL_survival_figures_final/Survival_adult_Multivariable_BDevOnly_HazardRatios.pdf', device = 'pdf', height = 7.5, width = 4.5)
+
+surv_adult_uni | surv_adult_multi
+```
+
+
+
+
+### Re-run within BCR::ABL1 patients
+
+```{r}
+# Keep BCR::ABL1 patients
+bulk2046_ph <- bulk2046 %>% filter(new_Subtype == 'BCR::ABL1')  
+
+bulk2046_ph
+bulk2046_ph %>% filter(oscensor %in% c('0','1')) %>% pull(Institute) %>% table()
+```
+
+
+Loop through developmental states and perform univariable + multivariable cox regression
+
+```{r}
+# dataframe to store results
+lineage_survival_ph <- data.frame()
+devstates <- c('Multipotency_Score', 'HSC_MPP', 'Myeloid_Prog', 'Pre_pDC', 'Early_Lymphoid', 'Pro_B', 'Pre_B')
+
+for(lineage in devstates){
+
+    # Univariable model stratifiying on institute and primary subtype
+    mod_os <- coxph(Surv(ostime, oscensor) ~ get(lineage), bulk2046_ph)
+    mod_efs <- coxph(Surv(efstime, efscensor) ~ get(lineage), bulk2046_ph)
+
+    lineage_survival_ph <- lineage_survival_ph %>% bind_rows(
+        summary(mod_os)$coefficients %>% data.frame() %>% dplyr::rename(HR = 'exp.coef.', HRse = 'se.coef.', statistic = 'z', pvalue = 'Pr...z..') %>% 
+            rownames_to_column('variable') %>% mutate(Lineage = lineage, multivariable = FALSE, survival = 'OS') %>% 
+            mutate(HR_upr = HR + 1.96*HRse, HR_lwr = HR - 1.96*HRse, 
+                   n_patients = mod_os$n) %>% 
+            filter(variable %>% str_detect('lineage')) %>% select(Lineage, survival, multivariable, HR, HRse, HR_lwr, HR_upr, n_patients, statistic, pvalue)
+    ) %>% bind_rows(
+        summary(mod_efs)$coefficients %>% data.frame() %>% dplyr::rename(HR = 'exp.coef.', HRse = 'se.coef.', statistic = 'z', pvalue = 'Pr...z..') %>% 
+            rownames_to_column('variable') %>% mutate(Lineage = lineage, multivariable = FALSE, survival = 'EFS') %>% 
+            mutate(HR_upr = HR + 1.96*HRse, HR_lwr = HR - 1.96*HRse, 
+                   n_patients = mod_efs$n) %>% 
+            filter(variable %>% str_detect('lineage')) %>% select(Lineage, survival, multivariable, HR, HRse, HR_lwr, HR_upr, n_patients, statistic, pvalue)
+    )
+    
+    # Multivariable model stratifiying on institute and primary subtype
+    mod_multi_os <- coxph(Surv(ostime, oscensor) ~ get(lineage) + Risk_Group + Sex + Age + WBC, bulk2046_ph)
+    mod_multi_efs <- coxph(Surv(efstime, efscensor) ~ get(lineage) + Risk_Group + Sex + Age + WBC, bulk2046_ph)
+    
+    # Create baseline models without dev state abundance to compare against by nested LRT
+    mod_multi_os_0 <- coxph(Surv(ostime, oscensor) ~ Risk_Group + Sex + Age + WBC, bulk2046_ph)
+    mod_multi_efs_0 <- coxph(Surv(efstime, efscensor) ~ Risk_Group + Sex + Age + WBC, bulk2046_ph)
+
+    lineage_survival_ph <- lineage_survival_ph %>% bind_rows(
+        summary(mod_multi_os)$coefficients %>% data.frame() %>% dplyr::rename(HR = 'exp.coef.', HRse = 'se.coef.', statistic = 'z', pvalue = 'Pr...z..') %>% 
+            rownames_to_column('variable') %>% mutate(Lineage = lineage, multivariable = TRUE, survival = 'OS') %>% 
+            mutate(HR_upr = HR + 1.96*HRse, HR_lwr = HR - 1.96*HRse, 
+                   n_patients = mod_multi_os$n) %>% 
+            filter(variable %>% str_detect('lineage')) %>% select(Lineage, survival, multivariable, HR, HRse, HR_lwr, HR_upr, n_patients, statistic, pvalue) %>% 
+            # nested LRT: how much prognostic info does dev state add beyond baseline model?
+            mutate(pvalue_nestedLRT = anova(mod_multi_os, mod_multi_os_0)[2,'P(>|Chi|)'])
+        
+    ) %>% bind_rows(
+      
+        summary(mod_multi_efs)$coefficients %>% data.frame() %>% dplyr::rename(HR = 'exp.coef.', HRse = 'se.coef.', statistic = 'z', pvalue = 'Pr...z..') %>% 
+            rownames_to_column('variable') %>% mutate(Lineage = lineage, multivariable = TRUE, survival = 'EFS') %>% 
+            mutate(HR_upr = HR + 1.96*HRse, HR_lwr = HR - 1.96*HRse, 
+                   n_patients = mod_multi_efs$n) %>%
+            filter(variable %>% str_detect('lineage')) %>% select(Lineage, survival, multivariable, HR, HRse, HR_lwr, HR_upr, n_patients, statistic, pvalue) %>% 
+            # nested LRT: how much prognostic info does dev state add beyond baseline model?
+            mutate(pvalue_nestedLRT = anova(mod_multi_efs, mod_multi_efs_0)[2,'P(>|Chi|)'])
+        
+    )
+}
+
+lineage_survival_ph
+```
+
+
+Make forest plots
+
+```{r, fig.height = 5, fig.width = 6}
+surv_ph_uni <- lineage_survival_ph %>% mutate(logpval = ifelse(HR > 1, -log10(pvalue), log10(pvalue))) %>% 
+    mutate(Association = ifelse(HR_lwr > 1 & pvalue < 0.05, 'Adverse', ifelse(HR_upr < 1 & pvalue < 0.05, 'Favorable', 'N.S.'))) %>%
+    filter(multivariable == FALSE) %>% 
+    mutate(survname = ifelse(survival == 'OS', 'Overall Survival', ifelse(survival == 'EFS', 'Event-Free Survival', 'NA')) %>% 
+           factor(levels = c('Overall Survival', 'Event-Free Survival'))) %>%
+    mutate(Lineage = ifelse(Lineage %in% c('Myeloid_Prog', 'Early_Lymphoid', 'Mature_B', 'Multipotency_Score'), Lineage %>% str_replace('_', ' '), 
+                            Lineage %>% str_replace('_MPP', '/MPP') %>% str_replace('_NK', '/NK') %>% str_replace('_', '-')) %>% 
+             factor(levels = c('Multipotency Score', 'HSC/MPP', 'Myeloid Prog', 'Pre-pDC', 'Early Lymphoid', 'Pro-B', 'Pre-B'))) %>%  
+                               #'Mature B', 'T/NK', 'Monocyte', 'Erythroid', 'Multipotency Score'))) %>% 
+    ggplot(aes(x = Lineage, y = HR, ymax = HR_upr, ymin = HR_lwr, color = Association)) + 
+    geom_hline(yintercept = 1, lty = 2, size = 0.5, alpha = 1, color = 'darkgrey') + 
+    geom_pointrange(size=0.8, position=position_dodge(width=c(0))) +
+    facet_wrap(.~survname, ncol=1, scales = 'free_x') + 
+    scale_color_manual(values=c('indianred4', '#666666')) +   
+    theme_pubr(legend = 'right') + scale_y_continuous(breaks = scales::pretty_breaks(n=8), limits = c(0,2.5)) + theme(axis.title.x= element_blank()) + 
+    ylab('Univariable Hazard Ratio  (per 1SD increase in abundance)') + 
+    theme(axis.text.x = element_text(size = 10.5, angle = 90, hjust = 1, vjust = 0.5), strip.text.x = element_text(size=11), axis.text.y = element_text(size=10.5),
+          title = element_text(size = 10.5)) + 
+    ggtitle('Univariable Survival (n = 79)')
+    
+surv_ph_multi <- lineage_survival_ph %>% mutate(logpval = ifelse(HR > 1, -log10(pvalue), log10(pvalue))) %>% 
+    mutate(Association = ifelse(HR_lwr > 1 & pvalue_nestedLRT < 0.05, 'Adverse', ifelse(HR_upr < 1 & pvalue_nestedLRT < 0.05, 'Favorable', 'N.S.'))) %>%
+    filter(multivariable == TRUE) %>% 
+    mutate(survname = ifelse(survival == 'OS', 'Overall Survival', ifelse(survival == 'EFS', 'Event-Free Survival', 'NA')) %>% 
+           factor(levels = c('Overall Survival', 'Event-Free Survival'))) %>%
+    mutate(Lineage = ifelse(Lineage %in% c('Myeloid_Prog', 'Early_Lymphoid', 'Mature_B', 'Multipotency_Score'), Lineage %>% str_replace('_', ' '), 
+                            Lineage %>% str_replace('_MPP', '/MPP') %>% str_replace('_NK', '/NK') %>% str_replace('_', '-')) %>% 
+             factor(levels = c('Multipotency Score', 'HSC/MPP', 'Myeloid Prog', 'Pre-pDC', 'Early Lymphoid', 'Pro-B', 'Pre-B'))) %>%  
+                               #'Mature B', 'T/NK', 'Monocyte', 'Erythroid', 'Multipotency Score'))) %>% 
+    ggplot(aes(x = Lineage, y = HR, ymax = HR_upr, ymin = HR_lwr, color = Association)) + 
+    geom_hline(yintercept = 1, lty = 2, size = 0.5, alpha = 1, color = 'darkgrey') + 
+    geom_pointrange(size=0.8, position=position_dodge(width=c(0))) +
+    facet_wrap(.~survname, ncol=1, scales = 'free_x') + 
+    scale_color_manual(values=c('#666666')) +   
+    theme_pubr(legend = 'right') + scale_y_continuous(breaks = scales::pretty_breaks(n=8), limits = c(0,2.5)) + theme(axis.title.x= element_blank()) + 
+    ylab('Multivariable Hazard Ratio  (per 1SD increase in abundance)') + 
+    theme(axis.text.x = element_text(size = 10.5, angle = 90, hjust = 1, vjust = 0.5), strip.text.x = element_text(size=11), axis.text.y = element_text(size=10.5),
+          title = element_text(size = 10.5)) + 
+    ggtitle('Multivariable Survival (n = 76)')
+
+ggsave(plot = surv_ph_uni, filename = 'BALL_survival_figures_final/Survival_Ph_BALL2046_Univariable_BDevOnly_HazardRatios.pdf',
+     device = 'pdf', height = 7.5, width = 5.2)
+ggsave(plot = surv_ph_multi, filename = 'BALL_survival_figures_final/Survival_Ph_BALL2046_Multivariable_BDevOnly_HazardRatios.pdf',
+     device = 'pdf', height = 7.5, width = 5.2)
+
+surv_ph_uni | surv_ph_multi
+```
+
+
+
+# Kim et al BCR::ABL1 
+
+```{r}
+kim_phALL_vst <- read_csv('../subtype_subcluster/Kim2023_Ph_BALL/Kim2023_Ph_BALL_RNAseq_vst.csv')
+# calculate NMF scores from vst-normalized data
+kim_phALL_vst_DevStatescores <- calculate_DevState_scores(kim_phALL_vst %>% column_to_rownames('Gene') %>% data.matrix() , modelweights_withMultipotency, scale = T, sampleID = 'Sample')
+kim_phALL_vst_DevStatescores[1:20, ]
+```
+
+```{r}
+ph_BALL_combined <- read_csv('../subtype_subcluster/Kim2023_Ph_BALL/Kim2023_Ph_BALL_anno_cleaned.csv') %>% 
+  mutate(Sample = ifelse(Manuscript_name %>% str_detect('-R'), paste0(JAMLR, '_nn_M'), paste0(JAMLR, '_nn_P'))) %>% 
+  inner_join(kim_phALL_vst_DevStatescores) 
+
+ph_BALL_combined %>% write_csv('Kim2023_Ph_BALL_DevState_Scored_May2024.csv')
+ph_BALL_combined
+```
+
+Format for survival 
+
+```{r}
+ph_BALL_input <- ph_BALL_combined %>% 
+  # exclude a diagnosis - relapse pair
+  filter(Survival_analysis == 'yes') %>% filter(Age_at_dx > 19) 
+
+ph_BALL_input
+```
+
+
+```{r}
+lineage_survival_Ph_Kim <- data.frame()
+devstates <- c('Multipotency_Score', 'HSC_MPP', 'Myeloid_Prog', 'Pre_pDC', 'Early_Lymphoid', 'Pro_B', 'Pre_B')
+
+for(lineage in devstates){
+
+    # Univariable model stratifiying on institute and primary subtype
+    mod_os <- coxph(Surv(OS, alive) ~ get(lineage), ph_BALL_input)
+    mod_rfs <- coxph(Surv(RFS, relapse_or_death) ~ get(lineage), ph_BALL_input)
+
+    lineage_survival_Ph_Kim <- lineage_survival_Ph_Kim %>% bind_rows(
+        summary(mod_os)$coefficients %>% data.frame() %>% dplyr::rename(HR = 'exp.coef.', HRse = 'se.coef.', statistic = 'z', pvalue = 'Pr...z..') %>% 
+            rownames_to_column('variable') %>% mutate(Lineage = lineage, multivariable = FALSE, survival = 'OS') %>% 
+            filter(variable %>% str_detect('lineage')) %>% select(Lineage, survival, multivariable, HR, HRse, statistic, pvalue)
+    ) %>% bind_rows(
+        summary(mod_rfs)$coefficients %>% data.frame() %>% dplyr::rename(HR = 'exp.coef.', HRse = 'se.coef.', statistic = 'z', pvalue = 'Pr...z..') %>% 
+            rownames_to_column('variable') %>% mutate(Lineage = lineage, multivariable = FALSE, survival = 'RFS') %>% 
+            filter(variable %>% str_detect('lineage')) %>% select(Lineage, survival, multivariable, HR, HRse, statistic, pvalue)
+    )
+        
+    # Multivariable model stratifiying on institute and primary subtype
+    mod_multi_os <- coxph(Surv(OS, alive) ~ get(lineage) + sex + Age_at_dx + WBC, ph_BALL_input)
+    mod_multi_efs <- coxph(Surv(RFS, relapse_or_death) ~ get(lineage) + sex + Age_at_dx + WBC, ph_BALL_input)
+    
+    # Create baseline models without dev state abundance to compare against by nested LRT
+    mod_multi_os_0 <- coxph(Surv(OS, alive) ~ sex + Age_at_dx + WBC, ph_BALL_input)
+    mod_multi_efs_0 <- coxph(Surv(RFS, relapse_or_death) ~ sex + Age_at_dx + WBC, ph_BALL_input)
+
+    lineage_survival_Ph_Kim <- lineage_survival_Ph_Kim %>% bind_rows(
+        summary(mod_multi_os)$coefficients %>% data.frame() %>% dplyr::rename(HR = 'exp.coef.', HRse = 'se.coef.', statistic = 'z', pvalue = 'Pr...z..') %>% 
+            rownames_to_column('variable') %>% mutate(Lineage = lineage, multivariable = TRUE, survival = 'OS') %>% 
+            mutate(HR_upr = HR + 1.96*HRse, HR_lwr = HR - 1.96*HRse) %>% 
+            filter(variable %>% str_detect('lineage')) %>% select(Lineage, survival, multivariable, HR, HRse, HR_lwr, HR_upr, statistic, pvalue) %>% 
+            # nested LRT: how much prognostic info does dev state add beyond baseline model?
+            mutate(pvalue_nestedLRT = anova(mod_multi_os, mod_multi_os_0)[2,'P(>|Chi|)'])
+        
+    ) %>% bind_rows(
+      
+        summary(mod_multi_efs)$coefficients %>% data.frame() %>% dplyr::rename(HR = 'exp.coef.', HRse = 'se.coef.', statistic = 'z', pvalue = 'Pr...z..') %>% 
+            rownames_to_column('variable') %>% mutate(Lineage = lineage, multivariable = TRUE, survival = 'RFS') %>% 
+            mutate(HR_upr = HR + 1.96*HRse, HR_lwr = HR - 1.96*HRse) %>%
+            filter(variable %>% str_detect('lineage')) %>% select(Lineage, survival, multivariable, HR, HRse, HR_lwr, HR_upr, statistic, pvalue) %>% 
+            # nested LRT: how much prognostic info does dev state add beyond baseline model?
+            mutate(pvalue_nestedLRT = anova(mod_multi_efs, mod_multi_efs_0)[2,'P(>|Chi|)'])
+        
+    )
+}
+
+lineage_survival_Ph_Kim
+```
+
+
+```{r, fig.height = 5, fig.width = 3}
+lineage_survival_Ph_Kim %>% mutate(logpval = ifelse(HR > 1, -log10(pvalue), log10(pvalue))) %>% 
+    mutate(HR_upr = HR + 1.96*HRse, HR_lwr = HR - 1.96*HRse) %>%
+    mutate(Association = ifelse(HR_lwr > 1 & pvalue < 0.05, 'Adverse', ifelse(HR_upr < 1 & pvalue < 0.05, 'Favorable', 'N.S.'))) %>%
+    filter(multivariable == FALSE) %>% 
+    mutate(survname = ifelse(survival == 'OS', 'Overall Survival', ifelse(survival == 'RFS', 'Relapse-Free Survival', 'NA')) %>% 
+           factor(levels = c('Overall Survival', 'Relapse-Free Survival'))) %>%
+    mutate(Lineage = ifelse(Lineage %in% c('Myeloid_Prog', 'Early_Lymphoid', 'Mature_B', 'Multipotency_Score'), Lineage %>% str_replace('Prog', 'Progenitor') %>% str_replace('PC1_','') %>% str_replace('_', ' '), 
+                            Lineage %>% str_replace('_MPP', '/MPP') %>% str_replace('_NK', '/NK') %>% str_replace('_', '-')) %>% 
+             factor(levels = c('Multipotency Score', 'HSC/MPP', 'Myeloid Progenitor', 'Pre-pDC', 'Early Lymphoid', 'Pro-B', 'Pre-B'))) %>% 
+    ggplot(aes(x = Lineage, y = HR, ymax = HR_upr, ymin = HR_lwr, color = Association)) + 
+    geom_hline(yintercept = 1, lty = 2, size = 0.5, alpha = 1, color = 'darkgrey') + 
+    geom_pointrange(size=0.8, position=position_dodge(width=c(0))) +
+    facet_wrap(.~survname, ncol=1, scales = 'free_x') + 
+    scale_color_manual(values=c('indianred4', 'darkgreen', '#666666')) +   #'#744F80', '#303030'
+    theme_pubr(legend = 'right') + scale_y_continuous(breaks = scales::pretty_breaks(n=8), limits = c(0,2.5)) + theme(axis.title.x= element_blank()) + 
+    ylab('Univariable Hazard Ratio  (per 1SD increase in abundance)') + #ylim(c(0, 2.5)) +
+    theme(axis.text.x = element_text(size = 10.5, angle = 90, hjust = 1, vjust = 0.5), strip.text.x = element_text(size=11), axis.text.y = element_text(size=10.5),
+          title = element_text(size = 10.5)) + 
+    ggtitle('BCR::ABL1 Adult B-ALL (n = 41)')
+    
+ggsave(filename = 'BALL_survival_figures_final/Survival_Ph_Kim2023_Univariable_BDevOnly_HazardRatios.pdf', device = 'pdf', height = 7.5, width = 4.5)
+```
+
+
+```{r, fig.height = 5, fig.width = 3}
+lineage_survival_Ph_Kim %>% mutate(logpval = ifelse(HR > 1, -log10(pvalue), log10(pvalue))) %>% 
+    mutate(HR_upr = HR + 1.96*HRse, HR_lwr = HR - 1.96*HRse) %>%
+    mutate(Association = ifelse(HR_lwr > 1 & pvalue_nestedLRT < 0.05, 'Adverse', ifelse(HR_upr < 1 & pvalue_nestedLRT < 0.05, 'Favorable', 'N.S.'))) %>%
+    filter(multivariable == TRUE) %>% 
+    mutate(survname = ifelse(survival == 'OS', 'Overall Survival', ifelse(survival == 'RFS', 'Relapse-Free Survival', 'NA')) %>% 
+           factor(levels = c('Overall Survival', 'Relapse-Free Survival'))) %>%
+    mutate(Lineage = ifelse(Lineage %in% c('Myeloid_Prog', 'Early_Lymphoid', 'Mature_B', 'Multipotency_Score'), Lineage %>% str_replace('Prog', 'Progenitor') %>% str_replace('PC1_','') %>% str_replace('_', ' '), 
+                            Lineage %>% str_replace('_MPP', '/MPP') %>% str_replace('_NK', '/NK') %>% str_replace('_', '-')) %>% 
+             factor(levels = c('Multipotency Score', 'HSC/MPP', 'Myeloid Progenitor', 'Pre-pDC', 'Early Lymphoid', 'Pro-B', 'Pre-B'))) %>% 
+    ggplot(aes(x = Lineage, y = HR, ymax = HR_upr, ymin = HR_lwr, color = Association)) + 
+    geom_hline(yintercept = 1, lty = 2, size = 0.5, alpha = 1, color = 'darkgrey') + 
+    geom_pointrange(size=0.8, position=position_dodge(width=c(0))) +
+    facet_wrap(.~survname, ncol=1, scales = 'free_x') + 
+    scale_color_manual(values=c('indianred4', '#666666')) +   #'#744F80', '#303030'
+    theme_pubr(legend = 'right') + scale_y_continuous(breaks = scales::pretty_breaks(n=8), limits = c(0,2.5)) + theme(axis.title.x= element_blank()) + 
+    ylab('Multivariable Hazard Ratio  (per 1SD increase in abundance)') + #ylim(c(0, 2.5)) +
+    theme(axis.text.x = element_text(size = 10.5, angle = 90, hjust = 1, vjust = 0.5), strip.text.x = element_text(size=11), axis.text.y = element_text(size=10.5),
+          title = element_text(size = 10.5)) + 
+    ggtitle('BCR::ABL1 Adult B-ALL (n = 41)')
+    
+ggsave(filename = 'BALL_survival_figures_final/Survival_Ph_Kim2023_Multivariable_BDevOnly_HazardRatios.pdf', device = 'pdf', height = 7.5, width = 4.5)
+```
+
+
+# Compare with MPAL
+
+## Score in B-ALL vs MPAL(B/M)
+
+```{r}
+panleucohort <- readRDS("../../../../../../../../Other/PanLeuGeneExpr/panLeuTotal-rlog.rds")
+panleucohort_anno <- data.table::fread('../../../../../../../../Other/PanLeuGeneExpr/PanLeuCohort.csv') 
+panleucohort_BALL_MPAL <- panleucohort[,colnames(panleucohort) %in% filter(panleucohort_anno, disease %in% c('B-ALL', 'MPAL'))$sample]
+panleucohort_BALL_MPAL %>% dim()
+```
+
+```{r}
+panleucohort_rlog_DevStatescores <- calculate_DevState_scores(panleucohort_BALL_MPAL, modelweights_withMultipotency, scale = T, sampleID = 'sample')
+panleucohort_rlog_DevStatescores
+```
+
+
+```{r}
+panleu_scored <- panleucohort_rlog_DevStatescores %>% left_join(panleucohort_anno)
+panleu_scored %>% write_csv('panleucohort_BALL_MPAL_rlog_DevState_scores_May2024.csv')
+panleu_scored
+```
+
+## Sanity check between datasets
+
+Check correlation between the two datasets - same samples but presumably different alignments and different normalizations. 
+
+```{r, fig.height = 5, fig.width = 12}
+panleu_scored %>% filter(disease == 'B-ALL') %>% 
+  select(sample, HSC_MPP, Myeloid_Prog, Pre_pDC, Early_Lymphoid, Pro_B, Pre_B, Multipotency_Score) %>% 
+  pivot_longer(-sample, values_to = 'rlog') %>% 
+  # standardize within B-ALL
+  group_by(name) %>% mutate(rlog = (rlog - mean(rlog)) / sd(rlog)) %>% 
+  inner_join(
+    bulk2046 %>% select(sample = SampleID_old, HSC_MPP, Myeloid_Prog, Pre_pDC, Early_Lymphoid, Pro_B, Pre_B, Multipotency_Score) %>% 
+      pivot_longer(-sample, values_to = 'vst')
+  ) %>% 
+  mutate(name = factor(name, levels = c('Multipotency_Score', 'HSC_MPP', 'Myeloid_Prog', 'Pre_pDC', 'Early_Lymphoid', 'Pro_B', 'Pre_B'))) %>%
+  ggplot(aes(x = rlog, y = vst)) + 
+  geom_hline(yintercept=0) + geom_vline(xintercept=0) + 
+  geom_point(size = 0.5) + geom_smooth(method = 'lm') + stat_cor() + 
+  facet_wrap(.~name, ncol = 4) + xlab('rlog normalization (Montefiori et al)') + ylab('vst normalization (B-ALL 2046 cohort)')
+```
+
+
+
+## Compare Early subsets vs MPAL 
+
+```{r}
+pangeneleu_compare <- panleu_scored %>%
+  mutate(case_ID = sample %>% str_replace('_.*','')) %>% 
+  left_join(read_csv('../subtype_subcluster/Alexander_MPAL_Fusions.csv') %>%
+              mutate(ZNF384r = ifelse((gene_a == 'ZNF384') | (gene_b == 'ZNF384'), 1, 0), 
+                     KMT2Ar = ifelse((gene_a == 'KMT2A') | (gene_b == 'KMT2A'), 1, 0)) %>% 
+              group_by(case_ID) %>% 
+              summarise(ZNF384r = ifelse(sum(ZNF384r) >= 1, 'MPAL(ZNF384r)', 'Other'), 
+                        KMT2Ar = ifelse(sum(KMT2Ar) >= 1, 'KMT2Ar', 'Other')) %>% unique() ) %>% 
+  mutate(disease_subtype = ifelse(is.na(ZNF384r), subtype, ifelse(ZNF384r == 'MPAL(ZNF384r)', ZNF384r, subtype))) %>% 
+  left_join( 
+    bind_rows(
+      read_csv('../subtype_subcluster/KMT2A_subcluster142.csv') %>% mutate(case_ID = Patient %>% str_replace('_.*','')) %>% select(case_ID, subset = Subgroup),
+      read_tsv('../subtype_subcluster/DUX4_bulk.txt', col_names=F) %>% select(case_ID = X1, subset = X2))
+    ) %>% 
+  left_join(
+    read_tsv('../survival_analysis_old/Ph_BALL_CellofOrigin_Subtype.tsv') %>% select(sample = Samples, Cluster)
+  ) %>% 
+  mutate(subset = ifelse(is.na(subset), Cluster, subset))
+
+pangeneleu_compare %>% write_csv("pangeneleu_compare_BALL_MPAL_DevState_May2024.csv")
+pangeneleu_compare$subset %>% table()
+```
+
+
+```{r}
+pangeneleu_compare <- read_csv("pangeneleu_compare_BALL_MPAL_DevState_May2024.csv")
+pangeneleu_compare %>% select(disease_subtype, subset) %>% table()
+```
+
+
+```{r}
+# Subset to include B-ALL and B-lineage MPALs
+pangeneleu_compare <- pangeneleu_compare %>% filter(disease2 %in% c('B-ALL', 'MPAL(AUL)', 'MPAL(B/M)', 'MPAL(KMT2Ar)', 'MPAL(Ph)')) 
+abundances <- c('Multipotency_Score', 'HSC_MPP', 'Early_Lymphoid', 'Myeloid_Prog', 'Pre_pDC', 'Pro_B', 'Pre_B')
+
+
+# Get categories
+MPAL_BALL_categories <- bind_rows(
+  # ZNF384
+  pangeneleu_compare %>% filter(disease_subtype %>% str_detect('ZNF384')) %>% 
+    mutate(disease_category = paste0('ZNF384 ', disease)) %>% 
+    select(disease_category, abundances, disease, disease2, subset), 
+  # BCR::ABL1
+  pangeneleu_compare %>% filter(disease_subtype %>% str_detect('Ph')) %>% 
+    mutate(disease_category = paste0('BCR::ABL1 ', ifelse(disease == 'MPAL', 'MPAL',
+                                                   ifelse(subset %>% str_detect('Early'), 'Early-Pro', 
+                                                          ifelse(subset %>% str_detect('Inter'), 'Inter-Pro',
+                                                                 ifelse(subset %>% str_detect('Late'), 'Late-Pro', 'NA')))))) %>% 
+    select(disease_category, abundances, disease, disease2, subset) %>% filter(disease_category != 'BCR::ABL1 NA'), 
+  # KMT2A
+  pangeneleu_compare %>% filter(disease_subtype %>% str_detect('KMT2A')) %>% 
+    mutate(disease_category = paste0('KMT2A ', ifelse(disease == 'MPAL', 'MPAL',
+                                                      ifelse(subset %>% str_detect('KMT2A-b'), 'Early', 
+                                                             ifelse(subset %>% str_detect('KMT2A-a'), 'Committed', 'NA'))))) %>% 
+    select(disease_category, abundances, disease, disease2, subset) %>% filter(disease_category != 'KMT2A NA'), 
+  # DUX4
+  pangeneleu_compare %>% filter(disease_subtype %>% str_detect('DUX4')) %>% 
+    mutate(disease_category = ifelse(subset == 'D1', 'DUX4 Committed', ifelse(subset == 'D2', 'DUX4 Early', 'NA'))) %>% 
+    select(disease_category, abundances, disease, disease2) %>% filter(disease_category != 'NA'), 
+  # Other 
+  pangeneleu_compare %>% filter(!disease_subtype %>% str_detect('ZNF384|Ph|KMT2A|DUX4')) %>%
+    mutate(disease_category = paste0('Other ', disease)) %>% 
+    select(disease_category, abundances, disease, disease2, subset) %>% filter(disease_category != 'NA'), 
+  ) 
+
+MPAL_BALL_categories %>% select(disease_category, disease) %>% table()
+```
+
+
+```{r}
+cp_multipotency <- cutpointr(MPAL_BALL_categories, x = Multipotency_Score, class = disease, na.rm = TRUE, 
+                method = maximize_metric, metric = sum_sens_spec)
+plot(cp_multipotency)
+```
+
+```{r}
+cutoff <- cp_multipotency$optimal_cutpoint
+
+p <- MPAL_BALL_categories %>% 
+   mutate(disease_category = factor(disease_category, levels = rev(c('ZNF384 MPAL', 'ZNF384 B-ALL', 'KMT2A MPAL', 'KMT2A Early', 'BCR::ABL1 MPAL', 'BCR::ABL1 Early-Pro', 
+                                                                'Other MPAL', 'DUX4 Early', 'BCR::ABL1 Inter-Pro', 
+                                                                'BCR::ABL1 Late-Pro', 'KMT2A Committed', 'DUX4 Committed', 'Other B-ALL')))) %>%
+  ggplot(aes(y = disease_category, x = Multipotency_Score, fill=stat(x))) +
+    geom_density_ridges_gradient(
+        jittered_points = TRUE, scale = 1.7,
+        position = position_points_jitter(width = 0, height = 0), 
+        point_shape = '|', point_size = 3, point_alpha = 0.3) +
+    scale_fill_gradient2(midpoint=cutoff, high='#71305D', low='#5083A2', name = 'Multipotency\nScore') +
+    xlab(paste0('Multipotency Score')) +
+    theme_pubr() + xlim(-3, 3.7) +
+    geom_vline(xintercept = cutoff, lty = 2, alpha=0.5) + 
+    ylab('') + 
+    theme(legend.position='right', 
+          axis.text.y = element_text(size=12, color = c('dodgerblue4', 'dodgerblue4', 'dodgerblue4', 'dodgerblue4', 'dodgerblue4', 'darkgreen', 'indianred4', 
+                                                        'darkgreen', 'indianred4', 'darkgreen', 'indianred4', 'darkgreen', 'indianred4')),
+          axis.title.x = element_text(size=13)) 
+p
+```
+
+
+```{r}
+# need MPAL_BALL_categories, Ph, KMT2A, ZNF384
+plot_BALL_MPAL_categories <- function(value = 'Multipotency_Score', value_name = 'B-ALL Multipotency Score', cutpoint = cutpoint, ylimits = c(-3, 4)){
+
+  p0 <- MPAL_BALL_categories %>% 
+    filter(disease %in% c('B-ALL', 'MPAL')) %>% filter(disease_category %>% str_detect('Other')) %>% 
+    mutate(category = 'Other Subtypes') %>% mutate(disease_cat = ifelse(disease == 'MPAL', 'Other\nMPAL', 'Other\nB-ALL') %>% factor(levels = c('Other\nMPAL', 'Other\nB-ALL'))) %>% 
+    select(category, disease_cat, value) %>% pivot_longer(-c(category, disease_cat)) %>% 
+    ggplot(aes(x = disease_cat, y = value, fill = disease_cat)) + geom_hline(yintercept = cutpoint, lty = 2, alpha = 0.7) +
+    geom_boxplot(outlier.size = 0, alpha = 0.8) + ggbeeswarm::geom_quasirandom(aes(size = disease_cat), width = 0.3) + 
+    scale_fill_manual(values = c('indianred4', 'darkgreen')) + 
+    scale_size_manual(values = c(0.8, 0.15)) + 
+    facet_wrap(.~category) + 
+    stat_compare_means(comparisons = list(c('Other\nMPAL', 'Other\nB-ALL'))) + 
+    theme_pubr(legend = 'none') + ylab(value_name) + xlab('\nSubgroup') + ylim(ylimits) +
+    theme(strip.text.x = element_text(size = 13), axis.title = element_text(size = 13), axis.text.x = element_text(size = 12))
+  
+  p1 <- MPAL_BALL_categories %>% filter(disease_category %>% str_detect('BCR::ABL1')) %>% 
+    mutate(disease3 = ifelse(disease2 == 'B-ALL', paste0('BCR::ABL1\n', subset %>% str_replace('Ph_','')), 'BCR::ABL1\nMPAL') %>%  
+             factor(levels = rev(c('BCR::ABL1\nLate-Pro', 'BCR::ABL1\nInter-Pro', 'BCR::ABL1\nEarly-Pro', 'BCR::ABL1\nMPAL')))) %>% 
+    select(disease3, value) %>% #mutate(disease3 = paste0('BCR::ABL1\n',disease3)) %>% 
+    pivot_longer(-disease3) %>% 
+    mutate(category = 'BCR::ABL1') %>%
+    mutate(`Disease Subgroup` = ifelse(disease3 %>% str_detect('MPAL'), '\nMPAL (B/M)\n', 
+                                  ifelse(disease3 %>% str_detect('Early|ZNF384'), '\nB-ALL\nEarly/Multipotent\n',
+                                         ifelse(disease3 %>% str_detect('Inter'), '\nB-ALL\nInterPro\n', '\nB-ALL\nCommitted\n'))) %>% 
+             factor(levels = c('\nMPAL (B/M)\n', '\nB-ALL\nEarly/Multipotent\n', '\nB-ALL\nInterPro\n', '\nB-ALL\nCommitted\n'))) %>% 
+    ggplot(aes(x = disease3, y = value, fill = `Disease Subgroup`)) + geom_hline(yintercept = cutpoint, lty = 2, alpha = 0.7) +
+    geom_boxplot(outlier.size = 0, alpha = 0.8) + ggbeeswarm::geom_quasirandom(aes(size = `Disease Subgroup`), width = 0.3) + 
+    scale_fill_manual(values = c('indianred4', '#FF7F00', '#5EA2CF', '#1061D9')) + 
+    scale_size_manual(values = c(1, 0.6, 0.7, 0.7)) + 
+    facet_wrap(.~category) + 
+    stat_compare_means(comparisons = list(c('BCR::ABL1\nMPAL', 'BCR::ABL1\nEarly-Pro'), 
+                                          c('BCR::ABL1\nMPAL', 'BCR::ABL1\nInter-Pro'),
+                                          c('BCR::ABL1\nMPAL', 'BCR::ABL1\nLate-Pro'))) + 
+    theme_pubr(legend = 'none') + ylab(value_name) + xlab('\nSubgroup') + ylim(ylimits) +
+    theme(strip.text.x = element_text(size = 13), axis.title = element_text(size = 13), axis.text.x = element_text(size = 12))
+  
+  p2 <- MPAL_BALL_categories %>% filter(disease_category %>% str_detect('KMT2A')) %>% 
+    mutate(disease3 = ifelse(disease == 'B-ALL', subset, ifelse(disease == 'MPAL', 'KMT2A-r\nMPAL', subset))) %>% 
+    mutate(disease3 = disease3 %>% str_replace('KMT2A-a', 'KMT2A-r\nCommitted') %>% str_replace('KMT2A-b', 'KMT2A-r\nEarly') %>% 
+             factor(levels = c('KMT2A-r\nMPAL', 'KMT2A-r\nEarly', 'KMT2A-r\nCommitted'))) %>% filter(disease3 != 'NA') %>% 
+    select(disease3, value) %>% #mutate(disease3 = paste0('BCR::ABL1\n',disease3)) %>% 
+    pivot_longer(-disease3) %>% 
+    mutate(category = 'KMT2A-r') %>%
+    mutate(`Disease Subgroup` = ifelse(disease3 %>% str_detect('MPAL'), '\nMPAL (B/M)\n', 
+                                  ifelse(disease3 %>% str_detect('Early|ZNF384'), '\nB-ALL\nEarly/Multipotent\n', '\nB-ALL\nCommitted\n')) %>% 
+             factor(levels = c('\nMPAL (B/M)\n', '\nB-ALL\nEarly/Multipotent\n', '\nB-ALL\nCommitted\n'))) %>% 
+    ggplot(aes(x = disease3, y = value, fill = `Disease Subgroup`)) + geom_hline(yintercept = cutpoint, lty = 2, alpha = 0.7) +
+    geom_boxplot(outlier.size = 0, alpha = 0.8) + ggbeeswarm::geom_quasirandom(aes(size = `Disease Subgroup`), width = 0.3) + 
+    scale_fill_manual(values = c('indianred4', '#B22122', '#1D90FF')) + 
+    scale_size_manual(values = c(1, 0.6, 0.8)) + 
+    facet_wrap(.~category) + 
+    stat_compare_means(comparisons = list(c('KMT2A-r\nMPAL', 'KMT2A-r\nEarly'), c('KMT2A-r\nMPAL', 'KMT2A-r\nCommitted'))) +
+    theme_pubr(legend = 'none') + ylab(value_name) + xlab('\nSubgroup') + ylim(ylimits) +
+    theme(strip.text.x = element_text(size = 13), axis.title = element_text(size = 13), axis.text.x = element_text(size = 12))
+  
+  
+  p3 <- MPAL_BALL_categories %>% filter(disease_category %>% str_detect('ZNF384')) %>% 
+    mutate(disease3 = paste0('ZNF384-r\n',disease) %>% factor(levels = c('ZNF384-r\nMPAL', 'ZNF384-r\nB-ALL'))) %>% select(disease3, value) %>% 
+    pivot_longer(-disease3) %>% 
+    mutate(category = 'ZNF384-r') %>%
+    mutate(`Disease Subgroup` = ifelse(disease3 %>% str_detect('MPAL'), '\nMPAL (B/M)\n', 
+                                  ifelse(disease3 %>% str_detect('Early|ZNF384'), '\nB-ALL\nEarly/Multipotent\n', '\nB-ALL\nCommitted\n')) %>% 
+             factor(levels = c('\nMPAL (B/M)\n', '\nB-ALL\nEarly/Multipotent\n', '\nB-ALL\nCommitted\n'))) %>% 
+    ggplot(aes(x = disease3, y = value, fill = `Disease Subgroup`)) + geom_hline(yintercept = cutpoint, lty = 2, alpha = 0.7) +
+    geom_boxplot(outlier.size = 0, alpha = 0.8) + ggbeeswarm::geom_quasirandom(aes(size = `Disease Subgroup`), width = 0.3) + 
+    scale_fill_manual(values = c('indianred4', 'dodgerblue4')) + 
+    scale_size_manual(values = c(1, 0.7)) + 
+    facet_wrap(.~category) + 
+    stat_compare_means(comparisons = list(c('ZNF384-r\nMPAL', 'ZNF384-r\nB-ALL'))) + 
+    theme_pubr(legend = 'none') + ylab(value_name) + xlab('\nSubgroup') + ylim(ylimits) +
+    theme(strip.text.x = element_text(size = 13), axis.title = element_text(size = 13), axis.text.x = element_text(size = 12))
+  
+  return(ggarrange(p0, p1, p2, p3, ncol = 4, widths = c(0.58, 1, 0.8, 0.58)))
+}
+
+```
+
+
+```{r, fig.height=3.2, fig.width=10}
+plot_BALL_MPAL_categories(value = 'Multipotency_Score', value_name = 'B-ALL Multipotency Score', cutpoint = cp_multipotency$optimal_cutpoint, ylimits = c(-3, 3.75))
+ggsave('BALL_MultipotencyScore_Figures/BALL_vs_MPAL_bySubtype_MultipotencyScore.pdf', height = 4.8, width = 15, device = 'pdf')
+
+```
+
+
+```{r, fig.height=3.2, fig.width=10}
+cp <- cutpointr(MPAL_BALL_categories, x = HSC_MPP, class = disease, na.rm = TRUE, 
+                method = maximize_metric, metric = sum_sens_spec)
+plot_BALL_MPAL_categories(value = 'HSC_MPP', value_name = 'HSC/MPP Abundance', cutpoint = cp$optimal_cutpoint, ylimits = c(-2.8, 4))
+ggsave('BALL_MultipotencyScore_Figures/BALL_vs_MPAL_bySubtype_HSCMPP.pdf', height = 4.8, width = 15, device = 'pdf')
+
+```
+
+
+```{r, fig.height=3.2, fig.width=10}
+cp <- cutpointr(MPAL_BALL_categories, x = Early_Lymphoid, class = disease, na.rm = TRUE, 
+                method = maximize_metric, metric = sum_sens_spec)
+plot_BALL_MPAL_categories(value = 'Early_Lymphoid', value_name = 'Early Lymphoid Abundance', cutpoint = cp$optimal_cutpoint, ylimits = c(-2.8, 4))
+ggsave('BALL_MultipotencyScore_Figures/BALL_vs_MPAL_bySubtype_EarlyLymphoid.pdf', height = 4.8, width = 15, device = 'pdf')
+
+```
+
+
+```{r, fig.height=3.2, fig.width=10}
+cp <- cutpointr(MPAL_BALL_categories, x = Myeloid_Prog, class = disease, na.rm = TRUE, 
+                method = maximize_metric, metric = sum_sens_spec)
+plot_BALL_MPAL_categories(value = 'Myeloid_Prog', value_name = 'Myeloid Progenitor Abundance', cutpoint = cp$optimal_cutpoint, ylimits = c(-2.8, 5))
+ggsave('BALL_MultipotencyScore_Figures/BALL_vs_MPAL_bySubtype_MyeloidProg.pdf', height = 4.8, width = 15, device = 'pdf')
+
+```
+
+
+```{r, fig.height=3.2, fig.width=10}
+cp <- cutpointr(MPAL_BALL_categories, x = Pre_pDC, class = disease, na.rm = TRUE, 
+                method = maximize_metric, metric = sum_sens_spec)
+plot_BALL_MPAL_categories(value = 'Pre_pDC', value_name = 'Pre-pDC Abundance', cutpoint = cp$optimal_cutpoint, ylimits = c(-2.8, 4))
+ggsave('BALL_MultipotencyScore_Figures/BALL_vs_MPAL_bySubtype_PrePDC.pdf', height = 4.8, width = 15, device = 'pdf')
+
+```
+
+
+```{r, fig.height=3.2, fig.width=10}
+cp <- cutpointr(MPAL_BALL_categories, x = Pro_B, class = disease, na.rm = TRUE, 
+                method = maximize_metric, metric = sum_sens_spec)
+plot_BALL_MPAL_categories(value = 'Pro_B', value_name = 'Pro-B Abundance', cutpoint = cp$optimal_cutpoint, ylimits = c(-3.5, 3.3))
+ggsave('BALL_MultipotencyScore_Figures/BALL_vs_MPAL_bySubtype_ProB.pdf', height = 4.8, width = 15, device = 'pdf')
+
+```
+
+
+```{r, fig.height=3.2, fig.width=10}
+cp <- cutpointr(MPAL_BALL_categories, x = Pre_B, class = disease, na.rm = TRUE, 
+                method = maximize_metric, metric = sum_sens_spec)
+plot_BALL_MPAL_categories(value = 'Pre_B', value_name = 'Pre-B Abundance', cutpoint = cp$optimal_cutpoint, ylimits = c(-3, 3.8))
+ggsave('BALL_MultipotencyScore_Figures/BALL_vs_MPAL_bySubtype_ProB.pdf', height = 4.8, width = 15, device = 'pdf')
+
+```
+
+
+
+# Score on Pharmacotype Drug Screening Data  
+
+```{r}
+# require gene symbol column to be named "Gene"
+rpkm_to_logTPM <- function(dat){
+  # convert to TPM
+  dat_TPM <- dat %>% 
+    gather(-Gene, key = "Sample", value = "RPKM") %>%
+    group_by(Sample) %>% 
+    mutate(logTPM = log1p(RPKM / sum(RPKM) * 1000000)) %>% 
+    select(-RPKM) %>% ungroup() %>% 
+    spread(Sample, logTPM)
+  
+  return(dat_TPM)
+}
+
+# load pharmacotype data and convert to logTPM
+pharmacotype_fpkm <- data.table::fread('../pharmacotypes/pharmacotyping_ped_rnaseq_fpkm_ALLids_0823.csv') %>% select(-GeneID) %>% dplyr::rename(Gene = GeneName)
+pharmacotype_logTPM <- pharmacotype_fpkm %>% rpkm_to_logTPM()
+pharmacotype_logTPM <- pharmacotype_logTPM %>% column_to_rownames('Gene') %>% data.matrix()
+pharmacotype_logTPM %>% dim()
+```
+
+
+```{r}
+pharmacotype_logTPM_scored <- calculate_DevState_scores(pharmacotype_logTPM, modelweights_withMultipotency, scale = T, sampleID = 'Patient ID')
+pharmacotype_logTPM_scored %>% write_csv('ALL_pharmacotypes_logTPM_DevState_scores_May2024.csv')
+pharmacotype_logTPM_scored
+```
+
+
+
+
+
+## Which version of PC1 best separates subtypes within KMT2A, DUX4, BCR::ABL1?
+
+```{r}
+bulk2046_subtype_subcluster <- bulk2046 %>% filter(new_Subtype %in% c('BCR::ABL1', 'KMT2A', 'DUX4')) %>% select(Patient, PatientID = PatientID_old, new_Subtype, 
+                                                                                                                Multipotency_Score, HSC_MPP, Early_Lymphoid, Pro_B, Pre_B, 
+                                                                                                                Institute, oscensor, ostime, efscensor, efstime) %>% 
+  left_join( read_tsv("../subtype_subcluster/Ph_sub_clusters_S2046.txt", col_names = c('PatientID', 'Class')) %>% dplyr::rename(Ph_Class = Class), by = 'PatientID') %>% 
+  left_join( read_tsv("../subtype_subcluster/DUX4_bulk.txt", col_names = c('PatientID', 'Class')) %>% dplyr::rename(DUX4_Class = Class), by = 'PatientID') %>%
+  left_join( read_csv("../subtype_subcluster/KMT2A_subcluster142.csv") %>% select(Patient, KMT2A_Class = Subgroup), by = 'Patient') %>% 
+  arrange(new_Subtype) 
+
+bulk2046_subtype_subcluster$KMT2A_Class %>% table()
+```
+
+
+```{r}
+cutpointr(bulk2046_subtype_subcluster$HSC_MPP, bulk2046_subtype_subcluster$KMT2A_Class, na.rm=TRUE)
+cutpointr(bulk2046_subtype_subcluster$Early_Lymphoid, bulk2046_subtype_subcluster$KMT2A_Class, na.rm=TRUE)
+cutpointr(bulk2046_subtype_subcluster$Multipotency_Score, bulk2046_subtype_subcluster$KMT2A_Class, na.rm=TRUE)
+```
+
+```{r}
+cutpointr(bulk2046_subtype_subcluster$HSC_MPP, bulk2046_subtype_subcluster$DUX4_Class, na.rm=TRUE)
+cutpointr(bulk2046_subtype_subcluster$Early_Lymphoid, bulk2046_subtype_subcluster$DUX4_Class, na.rm=TRUE)
+cutpointr(bulk2046_subtype_subcluster$Multipotency_Score, bulk2046_subtype_subcluster$DUX4_Class, na.rm=TRUE)
+```
+
+```{r}
+temp <- bulk2046_subtype_subcluster %>% filter(Ph_Class %>% str_detect("Early|Late"))
+
+cutpointr(temp$HSC_MPP, temp$Ph_Class, na.rm=TRUE)
+cutpointr(temp$Early_Lymphoid, temp$Ph_Class, na.rm=TRUE)
+cutpointr(temp$Multipotency_Score, temp$Ph_Class, na.rm=TRUE)
+```
+
+```{r}
+temp <- bulk2046_subtype_subcluster %>% filter(Ph_Class %>% str_detect("Early|Inter"))
+
+cutpointr(temp$HSC_MPP, temp$Ph_Class, na.rm=TRUE)
+cutpointr(temp$Early_Lymphoid, temp$Ph_Class, na.rm=TRUE)
+cutpointr(temp$Multipotency_Score, temp$Ph_Class, na.rm=TRUE)
+```
+
+```{r}
+temp <- bulk2046_subtype_subcluster %>% filter(Ph_Class %>% str_detect("Late|Inter"))
+
+cutpointr(temp$HSC_MPP, temp$Ph_Class, na.rm=TRUE)
+cutpointr(temp$Early_Lymphoid, temp$Ph_Class, na.rm=TRUE)
+cutpointr(temp$Multipotency_Score, temp$Ph_Class, na.rm=TRUE)
+```
+
+
+
+
+
+
+
+

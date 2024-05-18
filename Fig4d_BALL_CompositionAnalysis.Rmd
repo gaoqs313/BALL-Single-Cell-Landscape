@@ -1,0 +1,623 @@
+---
+title: "BALL composition clusters"
+output: html_notebook
+---
+
+```{r}
+library(Seurat)
+library(tidyverse)
+```
+
+
+Seurat code for B-ALL single cell composition based clustering
+
+```{r}
+# CLR normalized abundance
+CompositionCLR <- read_csv("BALL_CellType_Composition_CLR.csv")
+CompositionCLR
+```
+
+```{r}
+clusteringAnno <- read_csv("BALLcomposition_NMFClustering_Anno.csv")
+clusteringAnno
+```
+
+```{r}
+clusteringAnno %>% filter(Cluster == 'F') %>% arrange(-PC1) %>% 
+  select(ID, subdiagnosis, age, Fusion, PC1, Relapse, blasts_percentage)
+```
+
+
+```{r}
+BDev_composition <- CreateSeuratObject(
+  CompositionCLR %>% column_to_rownames('TB_ID') %>% data.matrix() %>% t(),
+  meta.data = clusteringAnno %>% column_to_rownames('TB_ID') %>% select(-RNA)
+)
+BDev_composition
+```
+
+```{r}
+BDev_composition <- ScaleData(BDev_composition)
+```
+
+Visualize composition by CLR
+
+```{r, fig.height = 5, fig.width=15}
+bdev_celltypes <- c('HSC/MPP', 'MPP-MyLy', 'LMPP', 'Early GMP', 'Pre-pDC', 'Pre-pDC Cycling', 'pDC', 
+                    'MLP', 'CLP', 'Pre-Pro-B', 'Pre-Pro-B Cycling', 
+                    'Pro-B VDJ', 'Pro-B Cycling 1', 'Pro-B Cycling 2', 
+                    'Large Pre-B 1', 'Large Pre-B 2', 'Large Pre-B Unk', 'Small Pre-B', 'Immature B', 'Mature B')
+
+BDev_composition@active.ident <- BDev_composition$Cluster %>% factor()
+plot <- DoHeatmap(BDev_composition, assay='RNA', features = bdev_celltypes, slot = 'data', disp.max = 5)# + NoLegend()
+#ggplot2::ggsave(filename = paste0("Results/",clustname,"/GSVA_VIPER_TF_Regulons_top4.png"), plot = plot, height = dim(toppathways)[1]*0.25, width = 20) # can add additional parameters similar to png 
+print(plot)
+
+```
+
+
+```{r, fig.height = 4, fig.width = 12}
+library(magick)
+library(ComplexHeatmap)
+library(viridisLite)
+library(RColorBrewer)
+
+# Define celltypes and developmental states - column Annotations
+bdev_celltypes <- c('HSC/MPP', 'MPP-MyLy', 'LMPP', 'Early GMP', 'Pre-pDC', 'Pre-pDC Cycling', 'pDC', #'Pre-pDC Cycling',
+                    'MLP', 'CLP', 'Pre-Pro-B', #'Pre-Pro-B Cycling', 
+                    'Pro-B VDJ', 'Pro-B Cycling 1', 'Pro-B Cycling 2', 
+                    'Large Pre-B 1', 'Large Pre-B 2', #'Large Pre-B Unk', 
+                    'Small Pre-B', 'Immature B', 'Mature B')
+bdev_Developmental_States <- c('HSC/MPP/LMPP', 'HSC/MPP/LMPP', 'HSC/MPP/LMPP',
+                               'Early Myeloid', 
+                               'Plasmacytoid DC', 'Plasmacytoid DC', 'Plasmacytoid DC', 
+                               'Early Lymphoid', 'Early Lymphoid', 'Early Lymphoid', #'Early Lymphoid', 
+                               'Pro-B', 'Pro-B', 'Pro-B', 
+                               'Pre-B', 'Pre-B', 'Pre-B', #'Pre-B', 
+                               'B', 'B') %>% factor(levels = c('HSC/MPP/LMPP', 'Early Myeloid', 'Plasmacytoid DC', 'Early Lymphoid', 
+                                                               'Pro-B', 'Pre-B', 'B'))
+
+# 
+bdev_composition_matrix <- BDev_composition@assays$RNA@data[bdev_celltypes, BDev_composition@meta.data %>% arrange(-PC1) %>% arrange(Cluster) %>% rownames()] %>% as.matrix()
+bdev_composition_matrix[bdev_composition_matrix > 6] <- 6
+bdev_composition_matrix[bdev_composition_matrix < 0] <- 0  # in this dataset, negative CLR means proportion below 0.01, so for visual purposes let's cap it there
+
+ann <- data.frame('Cluster' = BDev_composition@meta.data %>% arrange(-PC1) %>% arrange(Cluster) %>% pull(Cluster))
+colours <- list('Cluster' = c('A' = '#ff7f0e', 'B' = '#d62728', 'C' = '#1f77b4', 'D' = '#279e68', 'E' = '#8c564b', 'F' = '#e377c2', 'G' = '#aa40fc'))#, 
+
+colAnn <- HeatmapAnnotation(df = ann,
+  which = 'col',
+  col = colours,
+  annotation_width = unit(c(1, 4), 'cm'),
+  gap = unit(1, 'mm'), annotation_legend_param = list(
+        Cell_Type = list(direction = "vertical"), legends_gp = gpar(fontsize = 20)), show_annotation_name = TRUE)
+
+pdf("CompositionFigures/CellType_AbundanceCLR_ComplexHeatmap.pdf",width=18, height=6)
+
+hmap <- Heatmap(
+  data.matrix(bdev_composition_matrix),
+  name = "Abundance:\n(CLR Normalized)",
+  column_split = ann$Cluster, column_gap = unit(2, 'mm'),
+  row_split = bdev_Developmental_States, row_title_rot = 0, 
+  cluster_rows = FALSE,
+  cluster_columns = FALSE, show_column_names = FALSE, top_annotation=colAnn, #width = 30, height = 40,
+  #heatmap_legend_param = list(direction = "vertical", legends_gp = gpar(fontsize = 10)), 
+  col = colorRampPalette(brewer.pal(9, "BuPu"))(100)) #col = rev(colorRampPalette(brewer.pal(9, "RdBu"))(12)))
+
+draw(hmap, heatmap_legend_side = "right", annotation_legend_side = "right", merge_legend = TRUE)
+dev.off()
+
+draw(hmap, heatmap_legend_side = "right", annotation_legend_side = "right", merge_legend = TRUE)
+
+```
+
+
+
+
+```{r}
+BDev_composition@meta.data %>% filter(subdiagnosis == 'ZNF384') %>% arrange(-PC1) %>% select(ID, subdiagnosis, Fusion, age, risk_group)
+```
+
+
+MRD_D46 (EOI) / EOI MRD (pos/neg)
+ 
+TB-97-1177  neg / neg
+TB-90-0922  neg/ pos (28.5)
+TB-96-1010  neg/neg
+TB-94-0662  neg/neg
+
+
+```{r}
+BDev_composition@meta.data %>% filter(MRD %>% is.na()) %>% select(TB_ID, diagnosis, subdiagnosis, risk_group, composition_cluster)
+```
+
+
+```{r}
+BDev_composition@meta.data %>% filter(subdiagnosis %>% str_detect('Ph_')) %>% select(age, sex, subdiagnosis, composition_cluster, Fusion, risk_group, PC1, oscensor, MRD) %>% arrange(-PC1)
+```
+
+
+## Check
+
+```{r}
+BDev_composition$composition_cluster <- BDev_composition$Cluster# %>% factor(levels = c('1', '2', '0', '4', '3'))
+#BDev_composition$consensusCluster %>% factor(levels = c('5', '6', '1', '3', '4', '2'))
+BDev_composition@meta.data <- BDev_composition@meta.data %>% select(-Sample)
+```
+
+
+```{r, fig.height = 2, fig.width = 15}
+factor_levels <- c( 'AYA', 'Childhood HR', 'Childhood SR')
+BDev_composition$white_blood_cell_count <- BDev_composition$white_blood_cell_count %>% as.numeric() 
+
+temp <- BDev_composition@meta.data %>% 
+    rownames_to_column('Sample') %>%
+    mutate(present = 1) %>%
+    ## Impute 
+    mutate(risk_group = ifelse(risk_group %>% is.na(),
+                               ifelse(age < 1, 'Childhood SR',
+                                      ifelse(age > 15, 'AYA',
+                                             ifelse(age > 10, 'Childhood HR', 
+                                                    # if age between 1-10, WBC only does not include CNS status....
+                                                    ifelse(white_blood_cell_count >= 50, 'Childhood HR',
+                                                           ifelse(white_blood_cell_count < 50, 'Childhood SR', risk_group))))), risk_group)) %>% 
+    select(Sample, risk_group, present) %>% 
+    spread(risk_group, present) %>% 
+    replace(is.na(.), 0) #%>% 
+    #select(Sample, FAB_cat)
+
+# FAB status by cluster
+genomics_FAB <- BDev_composition@meta.data %>% 
+  rownames_to_column('Sample') %>% 
+  #mutate(composition_cluster = composition_cluster %>% factor(levels = c('A', 'B', 'C', 'D', 'E', 'F', 'G'))) %>%
+  select(Sample, composition_cluster, PC1) %>% 
+  inner_join(temp, by='Sample')
+
+p <- genomics_FAB %>% 
+    mutate(Sample = factor(Sample, levels = arrange(., -PC1)$Sample)) %>% 
+    dplyr::select(Sample, composition_cluster, factor_levels) %>%  
+    gather(-Sample, -composition_cluster, key='risk_group', value='status') %>% 
+    mutate(risk_group = factor(risk_group, levels = factor_levels), 
+           status = ifelse(status == 1, 'Positive', 'Negative')) %>%
+    ggplot(aes(risk_group, Sample, fill=status)) +
+    geom_tile() + 
+    #geom_vline(xintercept=1:length(FAB_cat) + 0.5, size=0.2, color='grey50') +
+    coord_flip() +
+    facet_grid(.~composition_cluster, scales='free_x', space = 'free_x') +
+    scale_fill_manual(values=c("grey95", "grey20")) +
+    ggpubr::theme_pubr() +
+    theme(legend.position = "right", axis.title.x = element_blank(), axis.ticks = element_blank(), axis.text.x = element_blank(), axis.title.y = element_blank(),
+          axis.line.x = element_line(colour = 'black', size = 0.2), axis.line.y = element_blank()) +
+    theme(axis.text.y = element_text(size=13, color = 'black'), strip.text.x = element_text(size=16), legend.text = element_text(size=15), legend.title = element_text(size=16))
+
+ggplot2::ggsave(filename = paste0("CompositionFigures/Focused_BDev_scBALLcomposition_clusters_riskgroup.pdf"), 
+                plot = p, height = 1.3, width = 18) # can add additional parameters similar to png 
+print(p)
+
+```
+
+```{r}
+temp <- genomics_FAB %>% 
+    mutate(Sample = factor(Sample, levels = arrange(., -PC1)$Sample)) %>% 
+    dplyr::select(Sample, composition_cluster, factor_levels)
+
+fisher.test(x = temp$composition_cluster, y = temp$`Childhood SR`)
+fisher.test(x = temp$composition_cluster, y = temp$`Childhood HR`)
+fisher.test(x = temp$composition_cluster, y = temp$`AYA`)
+
+```
+
+```{r}
+temp$composition_cluster <- ifelse(temp$composition_cluster %in% c('E'), 'D', temp$composition_cluster)
+fisher.test(x = temp$composition_cluster, y = temp$`Childhood SR`)
+fisher.test(x = temp$composition_cluster, y = temp$`Childhood HR`)
+fisher.test(x = temp$composition_cluster, y = temp$`AYA`)
+
+```
+
+
+
+
+```{r, fig.height = 2, fig.width = 15}
+factor_levels <- c('0 - 1 y.o.', '1 - 10 y.o.', '10 - 15 y.o.', '15 - 20 y.o.')
+
+temp <- BDev_composition@meta.data %>% 
+    rownames_to_column('Sample') %>%
+    mutate(present = 1) %>%
+    select(Sample, AgeCategory, present) %>% 
+    spread(AgeCategory, present) %>% 
+    replace(is.na(.), 0) #%>% 
+    #select(Sample, FAB_cat)
+
+# FAB status by cluster
+genomics_FAB <- BDev_composition@meta.data %>% 
+    rownames_to_column('Sample') %>% 
+  mutate(composition_cluster = composition_cluster %>% factor(levels = c('A', 'B', 'C', 'D', 'E', 'F', 'G'))) %>%
+  select(Sample, composition_cluster, PC1) %>% 
+  inner_join(temp, by='Sample')
+
+p <- genomics_FAB %>% 
+    mutate(Sample = factor(Sample, levels = arrange(., -PC1)$Sample)) %>% 
+    dplyr::select(Sample, composition_cluster, factor_levels) %>%  
+    gather(-Sample, -composition_cluster, key='AgeCategory', value='status') %>% 
+    mutate(AgeCategory = factor(AgeCategory, levels = rev(factor_levels)), 
+           status = ifelse(status == 1, 'Positive', 'Negative')) %>%
+    ggplot(aes(AgeCategory, Sample, fill=status)) +
+    geom_tile() + 
+    #geom_vline(xintercept=1:length(FAB_cat) + 0.5, size=0.2, color='grey50') +
+    coord_flip() +
+    facet_grid(.~composition_cluster, scales='free_x', space = 'free_x') +
+    scale_fill_manual(values=c("grey95", "grey20")) +
+    ggpubr::theme_pubr() +
+    theme(legend.position = "right", axis.title.x = element_blank(), axis.ticks = element_blank(), axis.text.x = element_blank(), axis.title.y = element_blank(),
+          axis.line.x = element_line(colour = 'black', size = 0.2), axis.line.y = element_blank()) +
+    theme(axis.text.y = element_text(size=13, color = 'black'), strip.text.x = element_text(size=16), legend.text = element_text(size=15), legend.title = element_text(size=16))
+
+ggplot2::ggsave(filename = paste0("CompositionFigures/Focused_BDev_scBALLcomposition_clusters_AgeCategory.pdf"), 
+                plot = p, height = 1.5, width = 18) # can add additional parameters similar to png 
+print(p)
+
+```
+
+```{r}
+fisher.test(x = genomics_FAB$composition_cluster, y = genomics_FAB$`0 - 1 y.o.`)
+fisher.test(x = genomics_FAB$composition_cluster, y = genomics_FAB$`1 - 10 y.o`)
+fisher.test(x = genomics_FAB$composition_cluster, y = genomics_FAB$`10 - 15 y.o`)
+fisher.test(x = genomics_FAB$composition_cluster, y = genomics_FAB$`15 - 20 y.o`)
+
+```
+
+
+```{r}
+BDev_composition$subdiagnosis %>% table()
+```
+
+
+
+
+```{r, fig.height = 3.5, fig.width = 15}
+BDev_composition$subtype <- ifelse(BDev_composition$subdiagnosis %in% c('Ph_1', 'Ph_2', 'Ph_intermediate'), 'Ph',
+                                   ifelse(BDev_composition$subdiagnosis %in% c('Ph-like_non CRLF2', 'Ph-like_CRLF2'), 'Ph-like',
+                                          BDev_composition$subdiagnosis))
+factor_levels <- c('ZNF384', 'Ph', 'KMT2A', 'DUX4', 'Ph-like', 'ETV6-RUNX1-like', 'Hyperdiploid', 'Near-haploid', 
+  'iAMP21', 'PAX5alt', 'MEF2D', 'TCF3-PBX1')
+  # excluded due to 1 sample 
+  # 'Low-hypodiploid', 'B-other'
+
+temp <- BDev_composition@meta.data %>% 
+    rownames_to_column('Sample') %>%
+    mutate(present = 1) %>%
+    select(Sample, subtype, present) %>% 
+    spread(subtype, present) %>% 
+    replace(is.na(.), 0) #%>% 
+    #select(Sample, FAB_cat)
+
+# FAB status by cluster
+genomics_FAB <- BDev_composition@meta.data %>% 
+    rownames_to_column('Sample') %>% 
+  #mutate(composition_cluster = composition_cluster %>% factor(levels = c('A','B','C','D','E','F','G'))) %>%
+  select(Sample, composition_cluster, PC1) %>% 
+  inner_join(temp, by='Sample')
+
+p <- genomics_FAB %>% 
+    dplyr::select(Sample, composition_cluster, PC1, factor_levels) %>%  
+    mutate(Sample = factor(Sample, levels = arrange(., -PC1)$Sample)) %>% 
+    dplyr::select(Sample, composition_cluster, factor_levels) %>%  
+    gather(-Sample, -composition_cluster, key='subtype', value='status') %>% 
+    mutate(subtype = factor(subtype, levels = rev(factor_levels)), 
+           status = ifelse(status == 1, 'Positive', 'Negative')) %>%
+    ggplot(aes(subtype, Sample, fill=status)) +
+    geom_tile() + 
+    geom_vline(xintercept=1:length(factor_levels) + 0.5, size=0.2, color='grey50') +
+    coord_flip() +
+    facet_grid(.~composition_cluster, scales='free_x', space = 'free_x') +
+    scale_fill_manual(values=c("grey95", "grey20")) +
+    ggpubr::theme_pubr() +
+    theme(legend.position = "right", axis.title.x = element_blank(), axis.ticks = element_blank(), axis.text.x = element_blank(), axis.title.y = element_blank(),
+          axis.line.x = element_line(colour = 'black', size = 0.2), axis.line.y = element_blank()) +
+    theme(axis.text.y = element_text(size=13, color = 'black'), strip.text.x = element_text(size=16), legend.text = element_text(size=15), legend.title = element_text(size=16))
+
+ggplot2::ggsave(filename = paste0("CompositionFigures/Focused_BDev_scBALLcomposition_clusters_genomicsubtype.pdf"), 
+                plot = p, height = 3.5, width = 18) # can add additional parameters similar to png 
+print(p)
+
+```
+
+```{r}
+genomics_FAB %>% 
+    dplyr::select(Sample, composition_cluster, PC1, factor_levels) 
+```
+
+
+
+```{r}
+fisher.test(x = genomics_FAB$composition_cluster, y = genomics_FAB$ZNF384)
+fisher.test(x = genomics_FAB$composition_cluster, y = genomics_FAB$Ph)
+fisher.test(x = genomics_FAB$composition_cluster, y = genomics_FAB$KMT2A)
+fisher.test(x = genomics_FAB$composition_cluster, y = genomics_FAB$DUX4)
+fisher.test(x = genomics_FAB$composition_cluster, y = genomics_FAB$`Ph-like`)
+fisher.test(x = genomics_FAB$composition_cluster, y = genomics_FAB$`ETV6-RUNX1-like`)
+fisher.test(x = genomics_FAB$composition_cluster, y = genomics_FAB$`Hyperdiploid`)
+fisher.test(x = genomics_FAB$composition_cluster, y = genomics_FAB$`Near-haploid`)
+fisher.test(x = genomics_FAB$composition_cluster, y = genomics_FAB$`iAMP21`)
+fisher.test(x = genomics_FAB$composition_cluster, y = genomics_FAB$`PAX5alt`)
+fisher.test(x = genomics_FAB$composition_cluster, y = genomics_FAB$`MEF2D`)
+fisher.test(x = genomics_FAB$composition_cluster, y = genomics_FAB$`TCF3-PBX1`)
+
+```
+
+
+```{r}
+genomics_FAB$composition_cluster <- ifelse(genomics_FAB$composition_cluster %in% c('E', 'C'), 'D', genomics_FAB$composition_cluster)
+fisher.test(x = genomics_FAB$composition_cluster, y = genomics_FAB$ZNF384)
+fisher.test(x = genomics_FAB$composition_cluster, y = genomics_FAB$Ph)
+fisher.test(x = genomics_FAB$composition_cluster, y = genomics_FAB$KMT2A)
+fisher.test(x = genomics_FAB$composition_cluster, y = genomics_FAB$DUX4)
+fisher.test(x = genomics_FAB$composition_cluster, y = genomics_FAB$`Ph-like`)
+fisher.test(x = genomics_FAB$composition_cluster, y = genomics_FAB$`ETV6-RUNX1-like`)
+fisher.test(x = genomics_FAB$composition_cluster, y = genomics_FAB$`Hyperdiploid`)
+fisher.test(x = genomics_FAB$composition_cluster, y = genomics_FAB$`Near-haploid`)
+fisher.test(x = genomics_FAB$composition_cluster, y = genomics_FAB$`iAMP21`)
+fisher.test(x = genomics_FAB$composition_cluster, y = genomics_FAB$`PAX5alt`)
+fisher.test(x = genomics_FAB$composition_cluster, y = genomics_FAB$`MEF2D`)
+fisher.test(x = genomics_FAB$composition_cluster, y = genomics_FAB$`TCF3-PBX1`)
+
+```
+
+
+```{r, fig.height = 10, fig.width = 10}
+BDev_composition@meta.data %>% select_if(is.numeric) %>% cor(use="complete.obs") %>% data.frame() %>% arrange(-PC1) %>% select(PC1)
+```
+
+
+
+```{r, fig.height = 1.2, fig.width = 15}
+factor_levels <- c('5-year Survival')
+  # excluded due to 1 sample 
+  # 'Low-hypodiploid', 'B-other'
+
+temp <- BDev_composition@meta.data %>% 
+    rownames_to_column('Sample') %>%
+    mutate(present = 1) %>%
+    mutate(X5yr_overall_survival = ifelse(X5yr_overall_survival == 1, '5-year Survival', 
+                                          ifelse(X5yr_overall_survival == 0, 'Alive', X5yr_overall_survival))) %>%
+    select(Sample, X5yr_overall_survival, present) %>% 
+    spread(X5yr_overall_survival, present) %>% 
+    replace(is.na(.), 0) #%>% 
+    #select(Sample, FAB_cat)
+
+# FAB status by cluster
+genomics_FAB <- BDev_composition@meta.data %>% 
+    rownames_to_column('Sample') %>% 
+  #mutate(composition_cluster = composition_cluster %>% factor(levels = c('A','B','C','D','E','F','G'))) %>%
+  select(Sample, composition_cluster, PC1) %>% 
+  inner_join(temp, by='Sample')
+
+p <- genomics_FAB %>% 
+    dplyr::select(Sample, composition_cluster, PC1, factor_levels) %>%  
+    mutate(Sample = factor(Sample, levels = arrange(., -PC1)$Sample)) %>% 
+    dplyr::select(Sample, composition_cluster, factor_levels) %>%  
+    gather(-Sample, -composition_cluster, key='X5yr_overall_survival', value='status') %>% 
+    mutate(X5yr_overall_survival = factor(X5yr_overall_survival, levels = factor_levels), 
+           status = ifelse(status == 1, 'Dead', 'Alive')) %>%
+    ggplot(aes(X5yr_overall_survival, Sample, fill=status)) +
+    geom_tile() + 
+    geom_vline(xintercept=1:length(factor_levels) + 0.5, size=0.2, color='grey50') +
+    coord_flip() +
+    facet_grid(.~composition_cluster, scales='free_x', space = 'free_x') +
+    scale_fill_manual(values=c("grey95", "grey20")) +
+    ggpubr::theme_pubr() +
+    theme(legend.position = "right", axis.title.x = element_blank(), axis.ticks = element_blank(), axis.text.x = element_blank(), axis.title.y = element_blank(),
+          axis.line.x = element_line(colour = 'black', size = 0.2), axis.line.y = element_blank()) +
+    theme(axis.text.y = element_text(size=13, color = 'black'), strip.text.x = element_text(size=16), legend.text = element_text(size=15), legend.title = element_text(size=16))
+
+
+ggplot2::ggsave(filename = paste0("CompositionFigures/Focused_BDev_scBALLcomposition_clusters_5yrOS.pdf"), 
+                plot = p, height = 0.9, width = 18) # can add additional parameters similar to png 
+print(p)
+
+```
+
+
+```{r}
+fisher.test(x = genomics_FAB$composition_cluster, y = genomics_FAB$`5-year Survival`)
+```
+
+```{r, fig.height = 1.5, fig.width = 15}
+factor_levels <- c('No Event', 'Event')
+  # excluded due to 1 sample 
+  # 'Low-hypodiploid', 'B-other'
+
+temp <- BDev_composition@meta.data %>% 
+    rownames_to_column('Sample') %>%
+    mutate(present = 1) %>%
+    mutate(X5yr_eventfree_survival = ifelse(X5yr_eventfree_survival == 1, 'Event', 
+                                          ifelse(X5yr_eventfree_survival == 0, 'No Event', X5yr_eventfree_survival))) %>%
+    select(Sample, X5yr_eventfree_survival, present) %>% 
+    spread(X5yr_eventfree_survival, present) %>% 
+    replace(is.na(.), 0) #%>% 
+    #select(Sample, FAB_cat)
+
+# FAB status by cluster
+genomics_FAB <- BDev_composition@meta.data %>% 
+    rownames_to_column('Sample') %>% 
+  #mutate(composition_cluster = composition_cluster %>% factor(levels = c('A','B','C','D','E','F','G'))) %>%
+  select(Sample, composition_cluster, PC1) %>% 
+  inner_join(temp, by='Sample')
+
+genomics_FAB %>% 
+    dplyr::select(Sample, composition_cluster, PC1, factor_levels) %>%  
+    mutate(Sample = factor(Sample, levels = arrange(., -PC1)$Sample)) %>% 
+    dplyr::select(Sample, composition_cluster, factor_levels) %>%  
+    gather(-Sample, -composition_cluster, key='X5yr_eventfree_survival', value='status') %>% 
+    mutate(X5yr_eventfree_survival = factor(X5yr_eventfree_survival, levels = factor_levels), 
+           status = ifelse(status == 1, 'Positive', 'Negative')) %>%
+    ggplot(aes(X5yr_eventfree_survival, Sample, fill=status)) +
+    geom_tile() + 
+    geom_vline(xintercept=1:length(factor_levels) + 0.5, size=0.2, color='grey50') +
+    coord_flip() +
+    facet_grid(.~composition_cluster, scales='free_x', space = 'free_x') +
+    scale_fill_manual(values=c("grey95", "grey20")) +
+    ggpubr::theme_pubr() +
+    theme(legend.position = "right", axis.title.x = element_blank(), axis.ticks = element_blank(), axis.text.x = element_blank(), axis.title.y = element_blank(),
+          axis.line.x = element_line(colour = 'black', size = 0.2), axis.line.y = element_blank()) +
+    theme(axis.text.y = element_text(size=13, color = 'black'), strip.text.x = element_text(size=16), legend.text = element_text(size=15), legend.title = element_text(size=16))
+
+```
+
+
+```{r}
+fisher.test(x = genomics_FAB$composition_cluster, y = genomics_FAB$`Event`)
+```
+
+
+```{r, fig.height = 1.2, fig.width = 15}
+factor_levels <- c('MRD > 0.01%')
+  # excluded due to 1 sample 
+  # 'Low-hypodiploid', 'B-other'
+
+temp <- BDev_composition@meta.data %>% 
+    rownames_to_column('Sample') %>%
+    mutate(present = 1) %>%
+    select(Sample, MRD, present) %>% 
+    spread(MRD, present) %>% 
+    dplyr::rename(`MRD > 0.01%` = 'Positive') %>% 
+    replace(is.na(.), 0) #%>% 
+    #select(Sample, FAB_cat)
+
+# FAB status by cluster
+genomics_FAB <- BDev_composition@meta.data %>% 
+    rownames_to_column('Sample') %>% 
+  #mutate(composition_cluster = composition_cluster %>% factor(levels = c('A','B','C','D','E','F','G'))) %>%
+  select(Sample, composition_cluster, PC1) %>% 
+  inner_join(temp, by='Sample')
+
+p <- genomics_FAB %>% 
+    dplyr::select(Sample, composition_cluster, PC1, factor_levels) %>%  
+    mutate(Sample = factor(Sample, levels = arrange(., -PC1)$Sample)) %>% 
+    dplyr::select(Sample, composition_cluster, factor_levels) %>%  
+    gather(-Sample, -composition_cluster, key='MRD', value='status') %>% 
+    mutate(MRD = factor(MRD, levels = rev(factor_levels)), 
+           status = ifelse(status == 1, 'MRD Positive', 'MRD Negative')) %>%
+    ggplot(aes(MRD, Sample, fill=status)) +
+    geom_tile() + 
+    geom_vline(xintercept=1:length(factor_levels) + 0.5, size=0.2, color='grey50') +
+    coord_flip() +
+    facet_grid(.~composition_cluster, scales='free_x', space = 'free_x') +
+    scale_fill_manual(values=c("grey95", "grey20")) +
+    ggpubr::theme_pubr() +
+    theme(legend.position = "right", axis.title.x = element_blank(), axis.ticks = element_blank(), axis.text.x = element_blank(), axis.title.y = element_blank(),
+          axis.line.x = element_line(colour = 'black', size = 0.2), axis.line.y = element_blank()) +
+    theme(axis.text.y = element_text(size=13, color = 'black'), strip.text.x = element_text(size=16), legend.text = element_text(size=15), legend.title = element_text(size=16))
+
+ggplot2::ggsave(filename = paste0("CompositionFigures/Focused_BDev_scBALLcomposition_clusters_MRD.pdf"), 
+                plot = p, height = 1.2, width = 18) # can add additional parameters similar to png 
+print(p)
+
+```
+
+
+```{r}
+fisher.test(x = genomics_FAB$composition_cluster, y = genomics_FAB$`MRD > 0.01%`)
+```
+
+
+
+```{r, fig.height = 1.5, fig.width = 15}
+factor_levels <- c('Yes', 'No')
+
+temp <- BDev_composition@meta.data %>% 
+    rownames_to_column('Sample') %>%
+    mutate(present = 1) %>%
+    select(Sample, Relapse, present) %>% 
+    spread(Relapse, present) %>% 
+    replace(is.na(.), 0) #%>% 
+    #select(Sample, FAB_cat)
+
+# FAB status by cluster
+genomics_FAB <- BDev_composition@meta.data %>% 
+    rownames_to_column('Sample') %>% 
+  #mutate(composition_cluster = composition_cluster %>% factor(levels = c('A', 'B', 'C', 'D', 'E', 'F', 'G'))) %>%
+  select(Sample, composition_cluster, PC1) %>% 
+  inner_join(temp, by='Sample')
+
+p <- genomics_FAB %>% 
+    dplyr::select(Sample, composition_cluster, PC1, factor_levels) %>%  
+    mutate(Sample = factor(Sample, levels = arrange(., -PC1)$Sample)) %>% 
+    dplyr::select(Sample, composition_cluster, factor_levels) %>%  
+    gather(-Sample, -composition_cluster, key='Relapse', value='status') %>% 
+    mutate(Relapse = factor(Relapse, levels = rev(factor_levels)), 
+           status = ifelse(status == 1, 'Positive', 'Negative')) %>%
+    ggplot(aes(Relapse, Sample, fill=status)) +
+    geom_tile() + 
+    geom_vline(xintercept=1:length(factor_levels) + 0.5, size=0.2, color='grey50') +
+    coord_flip() +
+    facet_grid(.~composition_cluster, scales='free_x', space = 'free_x') +
+    scale_fill_manual(values=c("grey95", "grey20")) +
+    ggpubr::theme_pubr() +
+    theme(legend.position = "right", axis.title.x = element_blank(), axis.ticks = element_blank(), axis.text.x = element_blank(), axis.title.y = element_blank(),
+          axis.line.x = element_line(colour = 'black', size = 0.2), axis.line.y = element_blank()) +
+    theme(axis.text.y = element_text(size=13, color = 'black'), strip.text.x = element_text(size=16), legend.text = element_text(size=15), legend.title = element_text(size=16))
+
+ggplot2::ggsave(filename = paste0("CompositionFigures/Focused_BDev_scBALLcomposition_clusters_Relapse.pdf"), 
+                plot = p, height = 1.2, width = 18) # can add additional parameters similar to png 
+print(p)
+
+```
+
+```{r}
+fisher.test(x = genomics_FAB$composition_cluster, y = genomics_FAB$`Yes`)
+```
+
+```{r}
+BDev_composition$white_blood_cell_count %>% as.numeric() %>% log2()
+```
+
+
+
+```{r, fig.height = 2.5, fig.width = 15}
+BDev_composition$white_blood_cell_count <- BDev_composition$white_blood_cell_count %>% as.numeric() 
+
+p <- BDev_composition@meta.data %>% 
+    rownames_to_column('Sample') %>% 
+  #mutate(composition_cluster = composition_cluster %>% factor(levels = c('A','B','C','D','E','F','G'))) %>%
+  select(Sample, composition_cluster, PC1, white_blood_cell_count) %>%     
+  mutate(Sample = factor(Sample, levels = arrange(., -PC1)$Sample)) %>% 
+  mutate(WBC = ifelse(white_blood_cell_count >= 50, '> 50', '< 50') %>% factor(levels=c('> 50', '< 50'))) %>% 
+  ggplot(aes(x = Sample, y = white_blood_cell_count, fill = WBC)) +
+  geom_col() + scale_fill_manual(values = c('grey25', 'grey60')) +
+  facet_grid(.~composition_cluster, scales='free_x', space = 'free_x') +
+  ggpubr::theme_pubr() +
+  theme(legend.position = "right", axis.title.x = element_blank(), axis.ticks = element_blank(), axis.text.x = element_blank(), #axis.title.y = element_blank(),
+        axis.line.x = element_line(colour = 'black', size = 0.2), axis.line.y = element_blank()) +
+  theme(axis.text.y = element_text(size=13, color = 'black'), strip.text.x = element_text(size=16), legend.text = element_text(size=15), legend.title = element_text(size=16)) + 
+  ylab(expression(paste("White Blood Cells (x 10"^"9"*")"))) + 
+  geom_hline(yintercept = 50, lty=3, alpha = 0.7)
+
+ggplot2::ggsave(filename = paste0("CompositionFigures/Focused_BDev_scBALLcomposition_clusters_WBC.pdf"), 
+                plot = p, height = 2.5, width = 18) # can add additional parameters similar to png 
+plot(p)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
