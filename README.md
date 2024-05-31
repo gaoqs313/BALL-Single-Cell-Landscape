@@ -80,28 +80,26 @@ Rscript EDFig3b_NMF_specificity.R
 ==========================================================
 ## Establish a normal human B-cell development atlas
 
-Establish a single-cell atlas (Fig. 3c)
+We provide a notebook outlining our parameters to [construct the cross-ontogeny B-cell development atlas](https://htmlpreview.github.io/?https://github.com/gaoqs313/BALL-Single-Cell-Landscape/blob/main/Fig3.0_BDev_ProjectionSetup.nb.html) from the component datasets and a separate notebook to [characterize human B cell development at the single cell level](https://htmlpreview.github.io/?https://github.com/gaoqs313/BALL-Single-Cell-Landscape/blob/main/Fig3.1_BDevelopment_Atlas_Characterization.nb.html). 
+
+Notebooks and scripts related to analyses in Figure 3 
 ```
-Fig3c_BDev_ProjectionSetup.Rmd
-Fig3c_BDev_ProjectionSetup.html
+Fig3.0_BDev_ProjectionSetup.Rmd
+Fig3.1_BDevelopment_Atlas_Characterization.Rmd
+Fig3f_CEBPA_ATAC.R
 ```
 
 ==========================================================
 ## B-ALL projection along B cell development
 
-Project B-ALL cells onto B cell development reference (Fig. 4a, Fig. 4c)
-```
-Fig4ac_runBALL_projections.Rmd
-Fig4ac_runBALL_projections.html
-```
+We provide a notebook outlining how we performed [scRNA-seq projections of B-ALL transcriptomes](https://htmlpreview.github.io/?https://github.com/gaoqs313/BALL-Single-Cell-Landscape/blob/main/Fig4.0_runBALL_projections_updated.nb.html) onto normal B cell development and use these projection results to perform [B-ALL composition analysis](https://htmlpreview.github.io/?https://github.com/gaoqs313/BALL-Single-Cell-Landscape/blob/main/Fig4.1_BALL_composition_Analysis.ipynb). We summarise the composition analyses results in a complex heatmap depicting [B-ALL compositional clusters](https://htmlpreview.github.io/?https://github.com/gaoqs313/BALL-Single-Cell-Landscape/blob/main/Fig4.2_BALL_CompositionHeatmap.nb.html).
 
-B-ALL composition analysis (Fig. 4d)
+Notebooks and scripts related to analyses in Figure 3 
 ```
-Fig4d_BALL_CompositionAnalysis.Rmd
-Fig4d_BALL_CompositionAnalysis.html
+Fig4.0_runBALL_projections_updated.Rmd
+Fig4.1_BALL_composition_Analysis.ipynb
+Fig4.2_BALL_CompositionHeatmap.Rmd
 ```
-
-ADD SCRIPTS FOR FIGURE 4 E-H UMAPS
 
 ==========================================================
 ## Bulk RNA-seq analysis using LASSO regression
