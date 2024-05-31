@@ -92,7 +92,7 @@ Fig3f_CEBPA_ATAC.R
 ==========================================================
 ## B-ALL projection along B cell development
 
-We provide a notebook outlining how we performed [scRNA-seq projections of B-ALL transcriptomes](https://htmlpreview.github.io/?https://github.com/gaoqs313/BALL-Single-Cell-Landscape/blob/main/Fig4.0_runBALL_projections_updated.nb.html) onto normal B cell development and use these projection results to perform [B-ALL composition analysis](https://htmlpreview.github.io/?https://github.com/gaoqs313/BALL-Single-Cell-Landscape/blob/main/Fig4.1_BALL_composition_Analysis.ipynb). We summarise the composition analyses results in a complex heatmap depicting [B-ALL compositional clusters](https://htmlpreview.github.io/?https://github.com/gaoqs313/BALL-Single-Cell-Landscape/blob/main/Fig4.2_BALL_CompositionHeatmap.nb.html).
+We provide a notebook outlining how we performed [scRNA-seq projections of B-ALL transcriptomes](https://htmlpreview.github.io/?https://github.com/gaoqs313/BALL-Single-Cell-Landscape/blob/main/Fig4.0_runBALL_projections_updated.nb.html) onto normal B cell development and use these projection results to perform [B-ALL composition analysis](https://github.com/gaoqs313/BALL-Single-Cell-Landscape/blob/main/Fig4.1_BALL_composition_Analysis.ipynb). We summarise the composition analyses results in a complex heatmap depicting [B-ALL compositional clusters](https://htmlpreview.github.io/?https://github.com/gaoqs313/BALL-Single-Cell-Landscape/blob/main/Fig4.2_BALL_CompositionHeatmap.nb.html).
 
 Notebooks and scripts related to analyses in Figure 3 
 ```
