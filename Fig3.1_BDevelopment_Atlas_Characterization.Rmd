@@ -1,0 +1,388 @@
+---
+title: "B Development Signature Characterization"
+output: html_notebook
+---
+
+Characterize SCENIC and cNMF results from the normal B cell developmental atlas.
+
+```{r}
+library(Seurat)
+library(symphony)
+library(tidyverse)
+library(BoneMarrowMap)
+```
+
+```{r}
+bdev <- readRDS('../BDevelopment_Projections_OLD/BDevelopment_RefMap_AnnotatedCounts.rds')
+bdev
+```
+
+```{r, fig.height = 6, fig.width = 10}
+bdev$BDevelopment_CellType <- ifelse(bdev$BDevelopment_CellType == 'EarlyProB', 'CLP', bdev$BDevelopment_CellType %>% as.character())
+DimPlot(bdev, reduction = 'umap_custom', group.by = 'BDevelopment_CellType', label = T, raster = F)
+```
+
+
+```{r, fig.height = 4, fig.width = 15}
+library(Seurat)
+#bdev$BDevelopment_CellType <- ifelse(bdev$BDevelopment_CellType == 'EarlyProB', 'CLP', bdev$BDevelopment_CellType %>% as.character())
+DimPlot(bdev, reduction = 'umap_custom', group.by = 'BDevelopment_CellType', label = T, raster = F, split.by = 'Technology')
+```
+
+```{r, fig.height = 4, fig.width = 15}
+library(Seurat)
+#bdev$BDevelopment_CellType <- ifelse(bdev$BDevelopment_CellType == 'EarlyProB', 'CLP', bdev$BDevelopment_CellType %>% as.character())
+DimPlot(bdev, reduction = 'umap_custom', group.by = 'Study', label = T, raster = F, split.by = 'Technology')
+```
+
+#### Start with Immunoglobulin genes as a validation
+
+```{r}
+bdev_vargenes <- bdev[['RNA']]@var.features# %>% rownames()
+
+bdev_IGgenes <- list(
+  'IGH_main' = bdev_vargenes[!bdev_vargenes %>% str_detect('^IGH.*-')][bdev_vargenes[!bdev_vargenes %>% str_detect('^IGH.*-')] %>% str_detect('^IGH')],
+  'IGH_var' = bdev_vargenes[bdev_vargenes %>% str_detect('^IGH.*-')],
+  'IGK_main' = bdev_vargenes[!bdev_vargenes %>% str_detect('^IGK.*-')][bdev_vargenes[!bdev_vargenes %>% str_detect('^IGK.*-')] %>% str_detect('^IGK')],
+  'IGK_var' = bdev_vargenes[bdev_vargenes %>% str_detect('^IGK.*-')],
+  'IGL_main' = bdev_vargenes[!bdev_vargenes %>% str_detect('^IGL.*-')][bdev_vargenes[!bdev_vargenes %>% str_detect('^IGL.*-')] %>% str_detect('^IGL')],
+  'IGL_var' = bdev_vargenes[bdev_vargenes %>% str_detect('^IGL.*-')]
+)
+
+bdev_IGgenes %>% summary()
+```
+
+```{r}
+bdev <- score_Genesets_AUCell(bdev, genesets = bdev_IGgenes, nbatches = 5, ncores = 8, 
+                              output = 'assay', assay_name = 'IGgenes_AUCell') 
+bdev
+```
+```{r}
+bdev[['IGgenes_AUCell']]@counts > 0
+```
+
+
+```{r, fig.height = 4, fig.width = 18}
+library(RColorBrewer)
+bdev <- ScaleData(bdev, assay = 'IGgenes_AUCell')
+
+bdev@active.assay <- 'IGgenes_AUCell'
+FeaturePlot(bdev, features = c('IGH-var-AUC', 'IGK-var-AUC', 'IGL-var-AUC'), 
+            reduction = 'umap_custom', slot = 'data', raster = FALSE, min.cutoff = 0, max.cutoff = 0.5, ncol = 3) &
+  scale_colour_gradientn(colours = rev(brewer.pal(n = 11, name = "BuPu")))
+```
+
+```{r}
+bdev$BDevelopment_CellType_withUnk %>% table()
+```
+
+
+```{r, fig.height = 1.5, fig.width = 12}
+bdev$BDevelopment_CellType_withUnk_custom <- bdev$BDevelopment_CellType_withUnk %>% 
+  factor(levels = c('HSC/MPP', 'MPP-LMPP', 'LMPP', 'Early GMP', 'Pre-pDC', 'Pre-pDC Cycling', 'pDC', 
+                    'MLP', 'CLP', 'EarlyProB', 'Pre-Pro-B', 'Pre-Pro-B Cycling', 
+                    'Pro-B VDJ', 'Pro-B Cycling', 'Large Pre-B', 'Small Pre-B', 'Immature B', 'Mature B'))
+
+DotPlot(subset(bdev, BDevelopment_CellType_withUnk_custom != 'NA'), 
+        features = c('IGL-var-AUC', 'IGK-var-AUC', 'IGH-var-AUC'), 
+        group.by = 'BDevelopment_CellType_withUnk_custom', assay = 'IGgenes_AUCell') + coord_flip()
+```
+
+```{r, fig.height = 4, fig.width = 21}
+library(RColorBrewer)
+#bdev <- ScaleData(bdev, assay = 'RNA')
+
+bdev@active.assay <- 'RNA'
+FeaturePlot(bdev, features = c('VPREB1', 'RAG1', 'RAG2'), 
+            reduction = 'umap_custom', slot = 'scale.data', raster = FALSE, min.cutoff = -1, max.cutoff = 2, ncol = 3) &
+  scale_colour_gradientn(colours = rev(brewer.pal(n = 11, name = "RdBu")))
+```
+
+### Load in SCENIC
+
+```{r}
+bdev_scenic <- data.table::fread('BDevelopment_Characterization/pyscenic75kUMI_Bcell_singlecells.csv') %>%
+  column_to_rownames('Cell') %>% data.matrix()
+bdev_scenic[1:10,1:10]
+```
+
+```{r}
+bdev[['SCENIC_TF']] <- CreateAssayObject(bdev_scenic[colnames(bdev),] %>% t())
+bdev
+```
+
+```{r, fig.height = 6, fig.width = 10}
+DimPlot(bdev, reduction = 'umap_custom', group.by = 'BDevelopment_CellType', label = T, raster = F)
+```
+
+
+```{r}
+TFmarkers <- presto::wilcoxauc(bdev, group_by = 'BDevelopment_CellType', assay = 'data', seurat_assay = 'SCENIC_TF')
+TFmarkers
+```
+
+```{r}
+TFmarkers %>% group_by(group) %>% top_n(n = 20, wt = auc) %>% arrange(-auc) %>% arrange(group)
+```
+
+```{r}
+library(RColorBrewer)
+
+bdev@active.assay <- 'SCENIC_TF'
+bdev <- ScaleData(bdev)
+```
+
+
+```{r, fig.height = 15, fig.width = 25}
+FeaturePlot(bdev, reduction = 'umap_custom',  features = c('ERG(+)', 'CREB3L1(+)', 'ELK3(+)', 'SMAD1(+)', 
+                                                           'FOXO1(+)', 'TCF4(+)', 'POU4F1(+)', 'NR3C1(+)', 
+                                                           'IRF4(+)', 'POU4F1(+)', 'ETS1(+)', 'SOX4(+)', 
+                                                           'SHOX2(+)', 'FOXP1(+)', 'MAFA(+)', 'FOXO1(+)'), 
+            ncol = 4, min.cutoff = -1, max.cutoff = 2.5, slot = 'scale.data', raster = T) &
+  scale_colour_gradientn(colours = rev(brewer.pal(n = 11, name = "RdBu")))
+
+```
+
+
+```{r, fig.height = 15, fig.width = 25}
+FeaturePlot(bdev, reduction = 'umap_custom',  features = c('MECOM(+)', 'PRDM16(+)', 'NFIB(+)', 'HOXB5(+)', 
+                                                           'GATA3(+)', 'GATA2(+)', 'HOXA9(+)', 'RUNX1(+)', 
+                                                           'CEBPA(+)', 'CEBPE(+)', 'GFI1(+)', 'SPI1(+)', 
+                                                           'IRF8(+)', 'IRF7(+)', 'ETV2(+)', 'RUNX2(+)'), 
+            ncol = 4, min.cutoff = -1, max.cutoff = 2.5, slot = 'scale.data', raster = T) &
+  scale_colour_gradientn(colours = rev(brewer.pal(n = 11, name = "RdBu")))
+
+```
+
+
+```{r, fig.height = 5, fig.width = 5}
+BDevelopment_CellType_levels <- c('HSC/MPP', 'MPP-LMPP', 'LMPP', 'Early GMP', 'Pre-pDC', 'Pre-pDC Cycling', 'pDC', 
+                                  'MLP', 'CLP', 'Pre-Pro-B', 'Pre-Pro-B Cycling', 
+                                  'Pro-B VDJ', 'Pro-B Cycling', 'Large Pre-B', 'Small Pre-B', 'Immature B', 'Mature B')
+
+highlight_TFs <- c('CEBPA(+)', 'CEBPE(+)')
+highlight_TFs_mat <- bdev@assays[['SCENIC_TF']]@scale.data[highlight_TFs,] %>% t() 
+colnames(highlight_TFs_mat) <- highlight_TFs %>% str_replace('\\(.*','')
+highlight_TFs_df <- bdev@meta.data %>% select(Tissue, Ontogeny, BDevelopment_CellType) %>% rownames_to_column('Cell') %>% left_join(highlight_TFs_mat %>% data.frame() %>% rownames_to_column('Cell'))
+
+highlight_TFs_df %>% 
+  filter(BDevelopment_CellType != 'NA', Tissue != 'Cord Blood') %>%
+  mutate(Tissue = factor(Tissue, levels = c('Fetal Liver', 'Fetal Bone Marrow', 'Cord Blood', 'Bone Marrow'))) %>%
+  mutate(BDevelopment_CellType = factor(BDevelopment_CellType, levels = BDevelopment_CellType_levels)) %>% 
+  pivot_longer(-c('Cell', 'Ontogeny', 'Tissue', 'BDevelopment_CellType')) %>% 
+  ggplot(aes(x = BDevelopment_CellType, y = value, fill = Tissue)) + 
+  geom_boxplot(outlier.size = 0.00001) + 
+  facet_wrap(.~name, ncol=1, scales = 'free') + ggpubr::theme_pubr(legend = 'right') + 
+  ylim(c(-2.5, 3)) + scale_fill_brewer(palette = 'Dark2') +
+  xlab('Cell Type') + ylab('Regulon Enrichment Score') + 
+  theme(strip.text.x = element_text(size = 12.5)) + 
+  geom_hline(yintercept=0, lty=2) + theme(axis.text.x = element_text(angle=45, hjust = 1)) 
+
+```
+
+```{r, fig.height = 5, fig.width = 4}
+FeaturePlot(bdev, reduction = 'umap_custom', features = c('CEBPA(+)', 'CEBPE(+)'), 
+            ncol = 1, min.cutoff = -1, max.cutoff = 3, slot = 'scale.data', raster = T)
+```
+
+
+```{r, fig.height = 3, fig.width = 8}
+bdev$BDevelopment_CellType <- bdev$BDevelopment_CellType %>% factor(levels = c('HSC/MPP', 'MPP-LMPP', 'LMPP', 'Early GMP', #'Pre-pDC', 'Pre-pDC Cycling', 'pDC', 
+                                                                               'MLP', 'EarlyProB', 'Pre-Pro-B', 'Pre-Pro-B Cycling', 
+                                                                               'Pro-B VDJ', 'Pro-B Cycling', 'Large Pre-B', 'Small Pre-B', 'Immature B', 'Mature B') %>% rev())
+
+DotPlot(subset(bdev, BDevelopment_CellType != 'NA'), features = c('PROM1', 'SPINK2', 'CD34', 'IL7R', 'CD19', 'MS4A1', 'IKZF1', 'EBF1', 'PAX5', 'TCF3', 'SPI1'), group.by = 'BDevelopment_CellType', assay = 'RNA')
+```
+
+
+```{r, fig.height = 2.5, fig.width = 4}
+bdev$BDevelopment_CellType <- bdev$BDevelopment_CellType %>% factor(levels = c('HSC/MPP', 'MPP-LMPP', 'LMPP', 'Early GMP', #'Pre-pDC', 'Pre-pDC Cycling', 'pDC', 
+                                                                               'MLP', 'EarlyProB', 'Pre-Pro-B', 'Pre-Pro-B Cycling', 
+                                                                               'Pro-B VDJ', 'Pro-B Cycling', 'Large Pre-B', 'Small Pre-B', 'Immature B', 'Mature B') %>% rev())
+
+DotPlot(subset(bdev, BDevelopment_CellType != 'NA'), features = c('IKZF1', 'EBF1', 'PAX5', 'TCF3', 'SPI1'), group.by = 'BDevelopment_CellType', assay = 'RNA')
+```
+
+
+### Load NMF Signatures 
+
+```{r}
+cNMF <- data.table::fread('BDevelopment_Characterization/Bcell_development_sc_cNMF_12sig_usage_matrix.csv') %>%
+  column_to_rownames('V1')
+colnames(cNMF) <- c("NMF1_HSCMPP", "NMF10_Unk_1", "NMF5_ProB", "NMF7_B", "NMF6_PreB", "NMF8_CellCycle_1", "NMF2_GMP", "NMF3_pDC",
+                    "NMF4_EarlyLymphoid", "NMF11_Unk_2", "NMF12_Unk_3", "NMF9_CellCycle_2")
+# reorder
+cNMF <- cNMF[,c("NMF1_HSCMPP", "NMF2_GMP", "NMF3_pDC", "NMF4_EarlyLymphoid", "NMF5_ProB", "NMF6_PreB", "NMF7_B", 
+                "NMF8_CellCycle_1", "NMF9_CellCycle_2", "NMF10_Unk_1", "NMF11_Unk_2", "NMF12_Unk_3")] 
+cNMF[1:10,1:10]
+```
+
+```{r}
+bdev[['cNMF']] <- CreateAssayObject(cNMF[colnames(bdev),] %>% t())
+bdev
+```
+
+
+```{r, fig.height = 9, fig.width = 12}
+library(RColorBrewer)
+bdev <- ScaleData(bdev, assay = 'cNMF')
+
+FeaturePlot(bdev, features = rownames(bdev[['cNMF']]), reduction = 'umap_custom', 
+            slot = 'scale.data', raster = FALSE, min.cutoff = -1, max.cutoff = 2, ncol = 3)
+```
+
+
+```{r, fig.height = 6, fig.width = 7.5}
+BDevelopment_CellType_levels <- c('HSC/MPP', 'MPP-LMPP', 'LMPP', 'Early GMP', 'Pre-pDC', 'Pre-pDC Cycling', 'pDC', 
+                                  'MLP', 'CLP', 'Pre-Pro-B', 'Pre-Pro-B Cycling', 
+                                  'Pro-B VDJ', 'Pro-B Cycling', 'Large Pre-B', 'Small Pre-B', 'Immature B', 'Mature B')
+
+#highlight_TFs <- c('CEBPA(+)', 'CEBPE(+)')
+cNMF_mat <- bdev@assays[['cNMF']]@scale.data %>% data.matrix() %>% t() 
+cNMF_df <- bdev@meta.data %>% select(Tissue, Ontogeny, BDevelopment_CellType) %>% rownames_to_column('Cell') %>% 
+  left_join(cNMF_mat %>% data.frame() %>% rownames_to_column('Cell'))
+
+cNMF_df %>% 
+  filter(BDevelopment_CellType != 'NA') %>%
+  mutate(Tissue = factor(Tissue, levels = c('Fetal Liver', 'Fetal Bone Marrow', 'Cord Blood', 'Bone Marrow'))) %>%
+  mutate(BDevelopment_CellType = factor(BDevelopment_CellType, levels = BDevelopment_CellType_levels)) %>% 
+  pivot_longer(-c('Cell', 'Ontogeny', 'Tissue', 'BDevelopment_CellType')) %>% 
+  mutate(name = name %>% str_replace_all('\\.','_') %>% 
+           factor(levels = c("NMF1_HSCMPP", "NMF2_GMP", "NMF3_pDC", "NMF4_EarlyLymphoid", "NMF5_ProB", "NMF6_PreB", "NMF7_B", 
+                "NMF8_CellCycle_1", "NMF9_CellCycle_2", "NMF10_Unk_1", "NMF11_Unk_2", "NMF12_Unk_3"))) %>%
+  mutate(Ontogeny = ifelse(Tissue %>% str_detect("Fetal"), 'Pre-Natal', 'Post-Natal') %>% factor(levels = c('Pre-Natal', 'Post-Natal'))) %>%
+  ggplot(aes(x = BDevelopment_CellType, y = value, fill = Ontogeny)) + 
+  geom_boxplot(outlier.size = 0.00001) + 
+  facet_wrap(.~name, ncol=3, scales = 'free') + ggpubr::theme_pubr(legend = 'right') + 
+  ylim(c(-1.5, 3)) + 
+  #scale_fill_brewer(palette = 'Dark2') +
+  xlab('Cell Type') + ylab('Regulon Enrichment Score') + 
+  theme(strip.text.x = element_text(size = 12)) + 
+  geom_hline(yintercept=0, lty=2, alpha=0.5) + theme(axis.text.x = element_text(angle=45, hjust = 1)) 
+
+```
+
+
+```{r, fig.height = 6, fig.width = 7.5}
+BDevelopment_CellType_levels <- c('HSC/MPP', 'MPP-LMPP', 'LMPP', 'Early GMP', 'Pre-pDC', 'Pre-pDC Cycling', 'pDC', 
+                                  'MLP', 'CLP', 'Pre-Pro-B', 'Pre-Pro-B Cycling', 
+                                  'Pro-B VDJ', 'Pro-B Cycling', 'Large Pre-B', 'Small Pre-B', 'Immature B', 'Mature B')
+
+#highlight_TFs <- c('CEBPA(+)', 'CEBPE(+)')
+cNMF_mat <- bdev@assays[['cNMF']]@scale.data %>% data.matrix() %>% t() 
+cNMF_df <- bdev@meta.data %>% select(Tissue, Ontogeny, BDevelopment_CellType) %>% rownames_to_column('Cell') %>% 
+  left_join(cNMF_mat %>% data.frame() %>% rownames_to_column('Cell'))
+
+cNMF_df %>% 
+  filter(BDevelopment_CellType != 'NA') %>%
+  mutate(Tissue = factor(Tissue, levels = c('Fetal Liver', 'Fetal Bone Marrow', 'Cord Blood', 'Bone Marrow'))) %>%
+  mutate(BDevelopment_CellType = factor(BDevelopment_CellType, levels = BDevelopment_CellType_levels)) %>% 
+  pivot_longer(-c('Cell', 'Ontogeny', 'Tissue', 'BDevelopment_CellType')) %>% 
+  mutate(name = name %>% str_replace_all('\\.','_') %>% 
+           factor(levels = c("NMF1_HSCMPP", "NMF2_GMP", "NMF3_pDC", "NMF4_EarlyLymphoid", "NMF5_ProB", "NMF6_PreB", "NMF7_B", 
+                "NMF8_CellCycle_1", "NMF9_CellCycle_2", "NMF10_Unk_1", "NMF11_Unk_2", "NMF12_Unk_3"))) %>%
+  mutate(Ontogeny = ifelse(Tissue %>% str_detect("Fetal"), 'Pre-Natal', 'Post-Natal') %>% factor(levels = c('Pre-Natal', 'Post-Natal'))) %>%
+  ggplot(aes(x = BDevelopment_CellType, y = value, fill = Tissue)) + 
+  geom_boxplot(outlier.size = 0.00001) + 
+  facet_wrap(.~name, ncol=3, scales = 'free') + ggpubr::theme_pubr(legend = 'right') + 
+  ylim(c(-1.5, 3)) + 
+  #scale_fill_brewer(palette = 'Dark2') +
+  xlab('Cell Type') + ylab('Regulon Enrichment Score') + 
+  theme(strip.text.x = element_text(size = 12)) + 
+  geom_hline(yintercept=0, lty=2, alpha=0.5) + theme(axis.text.x = element_text(angle=45, hjust = 1)) 
+
+```
+
+
+
+```{r, fig.height = 5, fig.width = 9}
+BDevelopment_CellType_levels <- c('HSC/MPP', 'MPP-LMPP', 'LMPP', 'Early GMP', 'Pre-pDC', 'Pre-pDC Cycling', 'pDC', 
+                                  'MLP', 'CLP', 'Pre-Pro-B', 'Pre-Pro-B Cycling', 
+                                  'Pro-B VDJ', 'Pro-B Cycling', 'Large Pre-B', 'Small Pre-B', 'Immature B', 'Mature B')
+
+#highlight_TFs <- c('CEBPA(+)', 'CEBPE(+)')
+cNMF_mat <- bdev@assays[['cNMF']]@scale.data %>% data.matrix() %>% t() 
+cNMF_df <- bdev@meta.data %>% select(Tissue, Study, Technology, Ontogeny, BDevelopment_CellType) %>% rownames_to_column('Cell') %>% 
+  left_join(cNMF_mat %>% data.frame() %>% rownames_to_column('Cell'))
+
+cNMF_df %>% 
+  filter(BDevelopment_CellType != 'NA') %>%
+  mutate(Tissue = factor(Tissue, levels = c('Fetal Liver', 'Fetal Bone Marrow', 'Cord Blood', 'Bone Marrow'))) %>%
+  mutate(BDevelopment_CellType = factor(BDevelopment_CellType, levels = BDevelopment_CellType_levels)) %>% 
+  pivot_longer(-c('Study', 'Technology', 'Cell', 'Ontogeny', 'Tissue', 'BDevelopment_CellType')) %>% 
+  mutate(name = name %>% str_replace_all('\\.','_') %>% 
+           factor(levels = c("NMF1_HSCMPP", "NMF2_GMP", "NMF3_pDC", "NMF4_EarlyLymphoid", "NMF5_ProB", "NMF6_PreB", "NMF7_B", 
+                "NMF8_CellCycle_1", "NMF9_CellCycle_2", "NMF10_Unk_1", "NMF11_Unk_2", "NMF12_Unk_3"))) %>% 
+  ggplot(aes(x = BDevelopment_CellType, y = value, fill = Technology)) + 
+  geom_boxplot(outlier.size = 0.00001) + 
+  facet_wrap(.~name, ncol=4, scales = 'free') + ggpubr::theme_pubr(legend = 'right') + 
+  ylim(c(-1.5, 3)) + 
+  scale_fill_brewer(palette = 'Dark2') +
+  xlab('Cell Type') + ylab('Regulon Enrichment Score') + 
+  theme(strip.text.x = element_text(size = 12)) + 
+  geom_hline(yintercept=0, lty=2, alpha=0.5) + theme(axis.text.x = element_text(angle=45, hjust = 1))
+
+```
+
+
+Extract weights and score
+
+```{r}
+cNMF_weights <- data.table::fread('BDevelopment_Characterization/cNMF_full/Bcellscfull_cNMF.gene_spectra_score.k_12.dt_0_1.txt') %>% 
+  column_to_rownames('V1') %>% data.matrix() %>% t()
+cNMF_weights[1:10,1:10]
+```
+
+
+```{r}
+colnames(cNMF_weights) <- c("NMF1_HSCMPP", "NMF10_Unk_1", "NMF5_ProB", "NMF7_B", "NMF6_PreB", "NMF8_CellCycle_1", "NMF2_GMP", "NMF3_pDC",
+                            "NMF4_EarlyLymphoid", "NMF11_Unk_2", "NMF12_Unk_3", "NMF9_CellCycle_2")
+# reorder
+cNMF_weights <- cNMF_weights[,c("NMF1_HSCMPP", "NMF2_GMP", "NMF3_pDC", "NMF4_EarlyLymphoid", "NMF5_ProB", "NMF6_PreB", "NMF7_B", 
+                                "NMF8_CellCycle_1", "NMF9_CellCycle_2", "NMF10_Unk_1", "NMF11_Unk_2", "NMF12_Unk_3")] 
+cNMF_weights[1:10,1:12]
+```
+
+
+
+```{r}
+cNMF_weights_top100 <- cNMF_weights %>% as.data.frame() %>% rownames_to_column('Gene') %>% pivot_longer(-Gene, names_to = 'Signature', values_to = "Score") %>% 
+  mutate(Signature = factor(Signature, levels = c("NMF1_HSCMPP", "NMF2_GMP", "NMF3_pDC", "NMF4_EarlyLymphoid", "NMF5_ProB", "NMF6_PreB", "NMF7_B", 
+                                "NMF8_CellCycle_1", "NMF9_CellCycle_2", "NMF10_Unk_1", "NMF11_Unk_2", "NMF12_Unk_3"))) %>%
+  group_by(Signature) %>% top_n(n = 100, wt = Score) %>% 
+  arrange(-Score) %>% arrange(Signature) 
+  
+cNMF_weights_top100
+```
+
+```{r}
+cNMF_weights_top100 %>% group_by(Signature) %>% top_n(25, wt = Score) %>% select(-Score) %>% 
+  pivot_wider(names_from = 'Signature', values_from = 'Gene', values_fn = list) %>% unnest() %>% write_csv('BDevelopment_Characterization/BDev_cNMF_k12_TopGenes.csv')
+```
+
+```{r}
+cNMF_weights_top100 %>% group_by(Signature) %>% top_n(25, wt = Score) %>% select(-Score) %>% 
+  pivot_wider(names_from = 'Signature', values_from = 'Gene', values_fn = list) %>% unnest() 
+```
+
+
+```{r}
+cNMF_weights_top100 %>% group_by(Signature) %>% top_n(100, wt = Score) %>% select(-Score) %>% 
+  pivot_wider(names_from = 'Signature', values_from = 'Gene', values_fn = list) %>% unnest() %>% 
+  write_csv("BALLmap_paper/SupTables/Normal_BDev_cNMFweights_Top100.csv")
+```
+
+```{r}
+read_csv("BALLmap_paper/SupTables/ST10_Normal_BDev_cNMFweights_Top100.csv")
+```
+
+
+
+
+
+
+
+
+
+
+

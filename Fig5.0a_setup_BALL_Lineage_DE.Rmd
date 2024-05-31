@@ -1,0 +1,917 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+library(Seurat)
+library(DESeq2)
+```
+
+```{r}
+Full_mapdir = 'BALL_projections/Complete_BoneMarrowReference/'
+patient_files <- list.files(Full_mapdir, pattern = 'projected.rds')
+patient_files %>% head()
+```
+
+```{r}
+NMF_Lineages <- read_csv("CompositionAnalysis/NMF_CellType_Lineage_Assignments.csv") %>% 
+  select(Final_CellType = CellType, Lineage, NMF)
+NMF_Lineages
+```
+
+```{r}
+BALL_assignments <- read_csv('BALL_projections/BALL_89pt_CellType_FinalAssignments_updated.csv') 
+BALL_assignments
+```
+
+
+
+```{r}
+## Start with Focused B Development Reference Mapping
+pt_file <- patient_files[1]
+dat <- readRDS(paste0(Full_mapdir, pt_file))
+
+# Add CellType Annotations
+dat_anno <- dat@meta.data %>% rownames_to_column('Cell') %>% 
+  left_join(BALL_assignments) %>% 
+  filter(mapping_error_QC == 'Pass') %>% # , Final_CellType_prob > 0.5) %>% 
+  inner_join(NMF_Lineages) %>% 
+  column_to_rownames('Cell')
+
+pt_sample <- unique(dat_anno$ID)
+print(pt_sample)
+
+# Subset for filtered cells
+dat <- dat[['SymphonyQuery']]@counts
+dat <- CreateSeuratObject(dat[,rownames(dat_anno)], meta.data = dat_anno)
+
+# generate pseudobulk annotation dataframe
+pseudobulk_anno <- data.frame(
+  Patient = pt_sample,
+  ncells = dat_anno$Lineage %>% table()) %>%
+  dplyr::rename(Lineage = `ncells..`, nCells = `ncells.Freq`) %>%
+  mutate(index = paste0(Patient, '-', Lineage)) %>%
+  column_to_rownames('index')
+
+# aggregate count matrix by NMF_Lineage
+pseudobulk <- SeuratDisk::Transpose(Matrix.utils::aggregate.Matrix(t(as(dat@assays$RNA@counts, 'matrix')),
+                                                                   groupings = dat_anno$Lineage, fun = "sum"))
+colnames(pseudobulk) <- paste0(pt_sample, '-', colnames(pseudobulk))
+
+# create pseudobulk object
+BALL_pseudobulk <- CreateSeuratObject(counts = pseudobulk, meta.data = pseudobulk_anno)
+rm(dat, pseudobulk_anno, pseudobulk)
+BALL_pseudobulk
+```
+
+```{r}
+for(pt_file in patient_files[-1]){
+  dat <- readRDS(paste0(Full_mapdir, pt_file))
+  
+  # Add CellType Annotations
+  dat_anno <- dat@meta.data %>% rownames_to_column('Cell') %>% 
+    left_join(BALL_assignments) %>% 
+    filter(mapping_error_QC == 'Pass') %>% #, Final_CellType_prob > 0.5) %>% 
+    inner_join(NMF_Lineages) %>%
+    column_to_rownames('Cell')
+  
+  pt_sample <- unique(dat_anno$ID)
+  print(pt_sample)
+  
+  # Subset for filtered cells
+  dat <- dat[['SymphonyQuery']]@counts
+  dat <- CreateSeuratObject(dat[,rownames(dat_anno)], meta.data = dat_anno)
+  
+  # generate pseudobulk annotation dataframe
+  pseudobulk_anno <- data.frame(
+    Patient = pt_sample,
+    ncells = dat_anno$Lineage %>% table()) %>%
+    dplyr::rename(Lineage = `ncells..`, nCells = `ncells.Freq`) %>%
+    mutate(index = paste0(Patient, '-', Lineage)) %>%
+    column_to_rownames('index')
+  
+  # aggregate count matrix by CellType
+  pseudobulk <- SeuratDisk::Transpose(Matrix.utils::aggregate.Matrix(t(as(dat@assays$RNA@counts, 'matrix')),
+                                                                     groupings = dat_anno$Lineage, fun = "sum"))
+  colnames(pseudobulk) <- paste0(pt_sample, '-', colnames(pseudobulk))
+
+  # create pseudobulk object
+  temp_pseudobulk <- CreateSeuratObject(counts = pseudobulk, meta.data = pseudobulk_anno)
+  rm(dat, pseudobulk_anno, pseudobulk)
+
+  # add to existing BALL pseudobulk object
+  BALL_pseudobulk <- merge(BALL_pseudobulk, temp_pseudobulk)
+
+}
+
+rm(temp_pseudobulk)
+BALL_pseudobulk
+```
+
+```{r}
+BALL_pseudobulk %>% saveRDS('BALL_pseudobulk_by_NMF_Lineage.rds')
+```
+
+
+### Checkpoint
+
+```{r}
+library(tidyverse)
+library(ggpubr)
+library(DESeq2)
+```
+
+```{r}
+BALL_pseudobulk <- readRDS('BALL_pseudobulk_by_NMF_Lineage.rds')
+BALL_pseudobulk
+```
+
+```{r}
+BALL_pseudobulk@meta.data %>% 
+  ggplot(aes(x = reorder(Lineage, X = -nCells, FUN = median), y = nCells)) + 
+  geom_boxplot(outlier.size=0) + ggbeeswarm::geom_quasirandom(width=0.3, size=0.02) +
+  theme_pubr() + scale_y_log10() + theme(axis.text.x = element_text(angle=60, hjust=1)) +
+  geom_hline(yintercept=100, lty = 2) 
+```
+
+```{r}
+# because these are entire lineages rather than precise cell types, let's apply a filter of 100 cells per lineage 
+BALL_pseudobulk <- subset(BALL_pseudobulk, nCells >= 100)
+BALL_pseudobulk$Lineage %>% table()
+```
+
+```{r}
+# Filter for genes with counts >= 10
+BALL_pseudobulk <- CreateSeuratObject(BALL_pseudobulk@assays$RNA@counts[rowSums(BALL_pseudobulk@assays$RNA@counts) >= 10,], meta.data = BALL_pseudobulk@meta.data)
+BALL_pseudobulk
+```
+
+```{r}
+# BALL_pseudobulk %>% SeuratDisk::SaveH5Seurat('BALL_pseudobulk_byLineageNMF_filtered.h5seurat')
+# SeuratDisk::Convert('BALL_pseudobulk_byLineageNMF_filtered.h5seurat', dest = 'h5ad')
+```
+
+```{r}
+Lineage_DE <- data.frame()
+
+for(lineage in c('HSC_MPP_LMPP', 'Monocyte', 'Myeloid_Progenitor')){#unique(BALL_pseudobulk$Lineage)){
+  
+  print(lineage)
+  start <- Sys.time()
+  
+  # condition
+  BALL_pseudobulk$Condition <- ifelse(BALL_pseudobulk$Lineage == lineage, 1, 0) %>% factor()
+  included_patients <- BALL_pseudobulk@meta.data %>% filter(Condition == 1) %>% pull(Patient) 
+  
+  # DESeq2
+  Lineage_dds <- DESeqDataSetFromMatrix(subset(BALL_pseudobulk, Patient %in% included_patients)@assays$RNA@counts, 
+                                        colData = subset(BALL_pseudobulk, Patient %in% included_patients)@meta.data, design = ~Patient + Condition)
+  Lineage_dds <- DESeq(Lineage_dds)
+  Lineage_DE <- bind_rows(Lineage_DE, 
+                          results(Lineage_dds) %>% as.data.frame() %>% rownames_to_column('Gene') %>% mutate(Lineage = lineage) %>% filter(stat > 0) %>% arrange(-stat))
+  
+  print( Sys.time() - start )
+
+}
+
+Lineage_DE
+#Lineage_DE %>% write_csv('BALL_DEresults_NMF_Lineage.csv')
+```
+
+
+```{r}
+Lineage_DE2 <- data.frame()
+
+for(lineage in c('HSC_MPP_LMPP', 'Monocyte', 'Myeloid_Progenitor')){#unique(BALL_pseudobulk$Lineage)){
+  
+  print(lineage)
+  start <- Sys.time()
+  
+  # condition
+  BALL_pseudobulk$Condition <- ifelse(BALL_pseudobulk$Lineage == lineage, 1, 0) %>% factor()
+  included_patients <- BALL_pseudobulk@meta.data %>% filter(Condition == 1) %>% pull(Patient) 
+  
+  # DESeq2
+  Lineage_dds <- DESeqDataSetFromMatrix(subset(BALL_pseudobulk, Patient %in% included_patients)@assays$RNA@counts, 
+                                        colData = subset(BALL_pseudobulk, Patient %in% included_patients)@meta.data, design = ~Patient + Condition)
+  Lineage_dds <- DESeq(Lineage_dds, test = 'LRT', reduced = ~Patient)
+  Lineage_DE2 <- bind_rows(Lineage_DE2, 
+                          results(Lineage_dds) %>% as.data.frame() %>% rownames_to_column('Gene') %>% mutate(Lineage = lineage) %>% filter(stat > 0) %>% arrange(-stat))cc
+  
+  print( Sys.time() - start )
+
+}
+
+Lineage_DE2
+#Lineage_DE %>% write_csv('BALL_DEresults_NMF_Lineage.csv')
+```
+
+
+
+```{r}
+Lineage_DE3 <- data.frame()
+
+for(lineage in c('HSC_MPP_LMPP', 'Monocyte', 'Myeloid_Progenitor')){#unique(BALL_pseudobulk$Lineage)){
+  
+  print(lineage)
+  start <- Sys.time()
+  
+  # condition
+  BALL_pseudobulk$Condition <- ifelse(BALL_pseudobulk$Lineage == lineage, 1, 0) %>% factor()
+  included_patients <- BALL_pseudobulk@meta.data %>% filter(Condition == 1) %>% pull(Patient) 
+  
+  # DESeq2
+  Lineage_dds <- DESeqDataSetFromMatrix(subset(BALL_pseudobulk, Patient %in% included_patients)@assays$RNA@counts, 
+                                        colData = subset(BALL_pseudobulk, Patient %in% included_patients)@meta.data, design = ~Patient + Condition)
+  Lineage_dds <- DESeq(Lineage_dds, test = 'LRT', reduced = ~Patient, fitType = 'glmGamPoi', minReplicatesForReplace = Inf)
+  Lineage_DE3 <- bind_rows(Lineage_DE3, 
+                          results(Lineage_dds) %>% as.data.frame() %>% rownames_to_column('Gene') %>% mutate(Lineage = lineage) %>% filter(stat > 0) %>% arrange(-stat))cc
+  
+  print( Sys.time() - start )
+
+}
+
+Lineage_DE3
+#Lineage_DE %>% write_csv('BALL_DEresults_NMF_Lineage.csv')
+```
+
+
+### Load Pseudobulk DE Results 
+
+```{r}
+BALL_pseudobulk
+```
+
+```{r}
+Lineage_DE <- data.table::fread('BDevelopment_Characterization/BALL_DEresults_NMF_Lineage.csv') %>% filter(log2FoldChange > 0, padj < 0.01)
+Lineage_DE$Lineage %>% table()
+```
+
+```{r}
+BALL_pseudobulk_subset
+```
+
+
+```{r}
+Lineage_DE_markers <- Lineage_DE %>% 
+  mutate(padj = ifelse(padj < 1e-300, 1e-300, padj),
+         log10FDR = -log10(padj),
+         MarkerScore = (log2FoldChange * stat * log10FDR) ^ (1/3)) %>% 
+  filter(Lineage %in% c('HSC_MPP_LMPP', 'Myeloid_Progenitor', 'Pre_pDC', 'MLP_CLP_PreProB', 'Pro_B', 'Pre_B')) %>%#, 'Mature_B')) %>% 
+  mutate(Lineage = factor(Lineage, levels = c('HSC_MPP_LMPP', 'Myeloid_Progenitor', 'MLP_CLP_PreProB', 'Pre_pDC', 'Pro_B', 'Pre_B'))) %>%#, 'Mature_B'))) %>% 
+  group_by(Gene) %>% top_n(n = 1, wt = log10FDR) %>% 
+  arrange(-MarkerScore) %>% group_by(Lineage) %>% top_n(n = 100, wt = MarkerScore) %>% 
+  arrange(Lineage)
+
+Lineage_DE_markers
+```
+
+
+```{r}
+Lineage_DE %>% 
+  mutate(padj = ifelse(padj < 1e-300, 1e-300, padj),
+         log10FDR = -log10(padj),
+         MarkerScore = (log2FoldChange * stat * log10FDR) ^ (1/3)) %>% 
+  filter(Lineage %in% c('HSC_MPP_LMPP', 'Myeloid_Progenitor', 'Pre_pDC', 'MLP_CLP_PreProB', 'Pro_B', 'Pre_B')) %>%
+  mutate(Lineage = Lineage %>% str_replace('HSC_MPP_LMPP', 'HSC_MPP') %>% str_replace('MLP_CLP_PreProB', 'Early_Lymphoid') %>% str_replace('Progenitor', 'Prog')) %>%
+  mutate(Lineage = factor(Lineage, levels = c('HSC_MPP', 'Myeloid_Prog', 'Pre_pDC', 'Early_Lymphoid', 'Pro_B', 'Pre_B'))) %>%#, 'Mature_B'))) %>% 
+  group_by(Gene) %>% #top_n(n = 1, wt = log10FDR) %>% 
+  arrange(-MarkerScore) %>% group_by(Lineage) %>% top_n(n = 100, wt = MarkerScore) %>% 
+  arrange(Lineage) %>% 
+  select(Lineage, Gene) %>% pivot_wider(names_from = 'Lineage', values_from = 'Gene', values_fn = list) %>% unnest() %>% 
+  write_csv("BALLmap_paper/SupTables/BALL_DevState_Top100_MarkerGenes.csv")
+```
+
+
+
+```{r}
+BALL_pseudobulk_subset <- subset(BALL_pseudobulk, Lineage %in% c('HSC_MPP_LMPP', 'Myeloid_Progenitor', 'Pre_pDC', 'MLP_CLP_PreProB', 'Pro_B', 'Pre_B'))#, 'Mature_B'))
+BALL_pseudobulk_subset <- ScaleData(BALL_pseudobulk_subset, assay = 'RNA', features = Lineage_DE_markers$Gene)
+BALL_pseudobulk_subset$Lineage <- factor(BALL_pseudobulk_subset$Lineage, levels = c('HSC_MPP_LMPP', 'Myeloid_Progenitor',  'MLP_CLP_PreProB', 'Pre_pDC', 'Pro_B', 'Pre_B'))#, 'Mature_B'))
+DoHeatmap(BALL_pseudobulk_subset, features = Lineage_DE_markers$Gene, group.by = 'Lineage', slot = 'scale.data')
+```
+
+```{r, fig.height = 4, fig.width = 8}
+BALL_pseudobulk_subset$Lineage_new <- factor(BALL_pseudobulk_subset$Lineage %>% str_replace('HSC_MPP_LMPP', 'HSC / MPP') %>% str_replace('Myeloid_Progenitor', 'Myeloid Prog') %>% 
+                                               str_replace('MLP_CLP_PreProB', 'Early Lymphoid') %>% str_replace('_','-'), 
+                                             levels = c('HSC / MPP', 'Myeloid Prog',  'Early Lymphoid', 'Pre-pDC', 'Pro-B', 'Pre-B'))#, 'Mature_B'))
+
+DoHeatmap(BALL_pseudobulk_subset, features = Lineage_DE_markers$Gene, group.by = 'Lineage_new', slot = 'scale.data', disp.min = -2, disp.max = 2.5)
+ggsave('BDev_Figures/BALL_DevelopmentalStates_Top100_DEgenes.pdf', height = 8.5, width = 15, device='pdf')
+```
+
+
+```{r, fig.height = 6, fig.width = 12}
+DoHeatmap(BALL_pseudobulk_subset, features = Lineage_DE_markers$Gene, group.by = 'Lineage', slot = 'scale.data', disp.min = -2, disp.max = 2.5)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+### Correct naming real quick
+
+```{r}
+BALL_pseudobulk$Lineage <- ifelse(BALL_pseudobulk$Lineage == 'MLP_CLP_EarlyProB', 'MLP_CLP_PreProB', BALL_pseudobulk$Lineage)
+BALL_pseudobulk$Lineage %>% table()
+```
+
+```{r}
+BALL_pseudobulk %>% saveRDS('BALL_pseudobulk_by_NMF_Lineage.rds')
+```
+
+
+```{r}
+Lineage_DE <- Lineage_DE %>% mutate(Lineage = ifelse(Lineage == 'MLP_CLP_EarlyProB', 'MLP_CLP_PreProB', Lineage)) 
+Lineage_DE %>% write_csv('BALL_DEresults_NMF_Lineage.csv')
+```
+
+```{r}
+Lineage_DE %>% 
+  filter(padj < 0.05) %>% 
+  pull(Lineage) %>% table()
+```
+
+```{r}
+log2(1.5)
+```
+
+
+```{r}
+Lineage_DE %>% 
+  filter(padj < 0.05, log2FoldChange >= 0.8) %>% 
+  pull(Lineage) %>% table()
+```
+
+```{r}
+Lineage_DE %>% 
+  filter(padj < 0.05, log2FoldChange >= 1) %>% 
+  filter(Lineage == 'pDC_Myeloid_Prog')
+```
+
+
+
+```{r}
+Lineage_DE %>% 
+  filter(padj < 0.05) %>% 
+  filter(Lineage == 'HSC_MPP_LMPP')
+```
+
+
+
+
+```{r}
+library(AUCell)
+
+### Helper function for AUC thresholding from AUCell
+get_Threshold <- function (auc, gSetName, plotHist = TRUE, smallestPopPercent = 0.25, 
+          densAdjust = 2, thrP = 0.01, nBreaks = 100) 
+{
+  aucRow <- t(as.matrix(auc))
+  #gSetName <- rownames(aucRow)[1]
+  nCells <- length(auc)
+  skipGlobal <- TRUE
+  skipRed <- FALSE
+  skipSmallDens <- FALSE
+  commentMsg <- ""
+  aucThrs <- c()
+  notPopPercent <- 1 - smallestPopPercent
+  if (sum(auc == 0) > (nCells * notPopPercent)) {
+    skipGlobal <- FALSE
+    commentMsg <- paste(commentMsg, round((sum(auc == 0)/nCells) * 
+                                            100), "% (more than ", notPopPercent, "%) of AUC are zero. ", 
+                        sep = "")
+  }
+  meanAUC <- mean(auc)
+  sdAUC <- sd(auc)
+  maybeNormalDistr <- !suppressWarnings(ks.test(auc, rnorm(max(100, 
+                                                               length(auc)), mean = meanAUC, sd = sdAUC), alternative = "less")$p.value < 
+                                          0.01)
+  if (maybeNormalDistr) {
+    commentMsg <- paste0(commentMsg, "The AUC might follow a normal distribution (random gene-set?). ")
+    skipGlobal <- FALSE
+    aucThrs["outlierOfGlobal"] <- qnorm(1 - (thrP/nCells), 
+                                        mean = meanAUC, sd = sdAUC)
+  }
+  histogram <- hist(c(0, auc/max(auc)), breaks = 100, plot = FALSE)$count
+  if ((sum(histogram[1:5])/sum(histogram)) >= notPopPercent * 
+      0.75) {
+    skipGlobal <- FALSE
+    skipRed <- TRUE
+    skipSmallDens <- TRUE
+  }
+  if ((sum(histogram[1:10])/sum(histogram)) >= notPopPercent * 
+      0.5) {
+    skipSmallDens <- TRUE
+    skipGlobal <- FALSE
+    aucThrs["tenPercentOfMax"] <- max(auc) * 0.1
+  }
+  densCurve <- density(auc, adjust = densAdjust, cut = 0)
+  maximumsDens <- NULL
+  inflPoints <- diff(sign(diff(densCurve$y)))
+  maximumsDens <- which(inflPoints == -2)
+  globalMax <- maximumsDens[which.max(densCurve$y[maximumsDens])]
+  minimumDens <- which(inflPoints == 2)
+  smallMin <- NULL
+  if (!skipSmallDens) 
+    smallMin <- data.table::last(minimumDens[which(minimumDens < 
+                                                     globalMax)])
+  minimumDens <- c(smallMin, minimumDens[which(minimumDens > 
+                                                 globalMax)])
+  densTrh <- NULL
+  if (length(minimumDens) > 0) {
+    densTrh <- densCurve$x[min(minimumDens)]
+    if (length(maximumsDens) > 0) {
+      nextMaxs <- maximumsDens[which(densCurve$x[maximumsDens] > 
+                                       densTrh)]
+      if ((max(densCurve$y[nextMaxs])/max(densCurve$y)) < 
+          0.05) {
+        densTrh <- NULL
+      }
+    }
+  }
+  auc <- sort(auc)
+  distrs <- list()
+  distrs[["Global_k1"]] <- list(mu = c(meanAUC, NA), sigma = c(sdAUC, 
+                                                               NA), x = auc)
+  if ("mixtools" %in% rownames(installed.packages())) {
+    na <- capture.output(distrs[["k2"]] <- tryCatch(mixtools::normalmixEM(auc, 
+                                                                          fast = FALSE, k = 2, verb = FALSE), error = function(e) {
+                                                                            return(NULL)
+                                                                          }))
+    na <- capture.output(distrs[["k3"]] <- tryCatch(mixtools::normalmixEM(auc, 
+                                                                          fast = FALSE, k = 3, verb = FALSE), error = function(e) {
+                                                                            return(NULL)
+                                                                          }))
+    if (is.null(distrs[["k2"]]) && is.null(distrs[["k3"]])) {
+      if (sum(auc == 0) < (nCells * notPopPercent * 0.5)) 
+        skipGlobal <- FALSE
+    }
+    if (!is.null(distrs[["k2"]])) {
+      compL <- which.min(distrs[["k2"]][["mu"]])
+      compR <- which.max(distrs[["k2"]][["mu"]])
+      height1 <- 0.4/distrs[["k2"]][["sigma"]][compL] * 
+        distrs[["k2"]][["lambda"]][compL]
+      height2 <- 0.4/distrs[["k2"]][["sigma"]][compR] * 
+        distrs[["k2"]][["lambda"]][compR]
+      taller <- height1 < height2
+      globalInclInFirst <- (distrs[["Global_k1"]]$mu[1] < 
+                              (distrs[["k2"]][["mu"]][compL] + (1.5 * distrs[["k2"]][["sigma"]][compL])))
+      includedInGlobal <- ((distrs[["k2"]][["mu"]][compL] > 
+                              (distrs[["Global_k1"]]$mu[1] - distrs[["Global_k1"]]$sigma[1])) && 
+                             (distrs[["k2"]][["mu"]][compR] < (distrs[["Global_k1"]]$mu[1] + 
+                                                                 distrs[["Global_k1"]]$sigma[1])))
+      if (taller || (globalInclInFirst && includedInGlobal)) {
+        skipGlobal <- FALSE
+        if (globalInclInFirst && includedInGlobal) 
+          commentMsg <- paste(commentMsg, "The global distribution overlaps the partial distributions. ")
+        if (taller && !includedInGlobal) 
+          commentMsg <- paste(commentMsg, "The right distribution is taller. ")
+      }
+    }
+  }
+  else {
+    warning("Package 'mixtools' is not available to calculate the sub-distributions.")
+  }
+  glProb <- 1 - (thrP/nCells + smallestPopPercent)
+  aucThrs["Global_k1"] <- qnorm(glProb, mean = distrs[["Global_k1"]][["mu"]][1], 
+                                sd = distrs[["Global_k1"]][["sigma"]][1])
+  if (!is.null(distrs[["k2"]])) {
+    k2_L <- which.min(distrs[["k2"]][["mu"]])
+    aucThrs["L_k2"] <- qnorm(1 - (thrP/nCells), mean = distrs[["k2"]][["mu"]][k2_L], 
+                             sd = distrs[["k2"]][["sigma"]][k2_L])
+  }
+  if (!is.null(distrs[["k3"]])) {
+    k3_R <- which.max(distrs[["k3"]][["mu"]])
+    k3_R_threshold <- qnorm(thrP, mean = distrs[["k3"]][["mu"]][k3_R], 
+                            sd = distrs[["k3"]][["sigma"]][k3_R])
+    if (k3_R_threshold > 0) 
+      aucThrs["R_k3"] <- k3_R_threshold
+  }
+  if (!is.null(densTrh)) {
+    aucThrs["minimumDens"] <- densTrh
+  }
+  aucThr <- aucThrs
+  if (skipGlobal) 
+    aucThr <- aucThrs[which(!names(aucThrs) %in% "Global_k1")]
+  if (skipRed) 
+    aucThr <- aucThrs[which(!names(aucThrs) %in% "L_k2")]
+  aucThr <- aucThr[which.max(aucThr)]
+  if ((length(aucThr) > 0) && (names(aucThr) == "minimumDens")) {
+    maximumsDens <- maximumsDens[which(densCurve$y[maximumsDens] > 
+                                         1)]
+    if (length(maximumsDens) > 2) {
+      tmp <- cbind(minimumDens[seq_len(length(maximumsDens) - 
+                                         1)], maximumsDens[-1])
+      FCs <- densCurve$y[tmp[, 2]]/densCurve$y[tmp[, 1]]
+      if (any(FCs > 1.5)) 
+        warning(gSetName, ":\tCheck the AUC histogram. ", 
+                "'minimumDens' was selected as the best threshold, ", 
+                "but there might be several distributions in the AUC.")
+    }
+  }
+  if ("minimumDens" %in% names(aucThrs)) 
+    aucThr <- aucThrs["minimumDens"]
+  if (length(aucThr) == 0) 
+    aucThr <- aucThrs[which.max(aucThrs)]
+  if (length(aucThr) == 0) 
+    aucThr <- 1
+  if (length(aucThr) > 1) 
+    aucThr <- unlist(aucThr[which.max(aucThr)])
+  if (plotHist) {
+    histInfo <- AUCell_plotHist(aucRow, aucThr = aucThr, 
+                                nBreaks = nBreaks)
+    histMax <- max(histInfo[[gSetName]]$counts)
+    densCurve$y <- densCurve$y * (histMax/max(densCurve$y))
+    thisLwd <- ifelse((aucThrs["minimumDens"] == aucThr) && 
+                        (!is.null(aucThr) && !is.null(aucThrs["minimumDens"])), 
+                      3, 1)
+    lines(densCurve, lty = 1, lwd = thisLwd, col = "blue")
+    if (!is.null(minimumDens)) 
+      points(densCurve$x[minimumDens], densCurve$y[minimumDens], 
+             pch = 16, col = "darkblue")
+    scalFact <- 1
+    aucDistr <- dnorm(distrs[["Global_k1"]][["x"]], mean = distrs[["Global_k1"]][["mu"]][1], 
+                      sd = distrs[["Global_k1"]][["sigma"]][1])
+    scalFact <- (histMax/max(aucDistr)) * 0.95
+    thisLwd <- ifelse(aucThrs["Global_k1"] == aucThr, 3, 
+                      1)
+    lines(distrs[["Global_k1"]][["x"]], scalFact * aucDistr, 
+          col = "darkgrey", lwd = thisLwd, lty = 2)
+    if (!is.null(distrs[["k2"]])) {
+      aucDistr <- dnorm(distrs[["k2"]][["x"]], mean = distrs[["k2"]][["mu"]][k2_L], 
+                        sd = distrs[["k2"]][["sigma"]][k2_L])
+      scalFact <- (histMax/max(aucDistr)) * 0.95
+      thisLwd <- ifelse(aucThrs["k2"] == aucThr, 3, 1)
+      lines(distrs[["k2"]][["x"]], scalFact * aucDistr, 
+            col = "red", lwd = thisLwd, lty = 2)
+      rect(distrs[["k2"]][["mu"]][k2_L] - distrs[["k2"]][["sigma"]][k2_L], 
+           histMax - (histMax * 0.02), distrs[["k2"]][["mu"]][k2_L] + 
+             distrs[["k2"]][["sigma"]][k2_L], histMax, col = "#70000030", 
+           border = "#00009000")
+    }
+    if ((!is.null(distrs[["k3"]])) && ("R_k3" %in% names(aucThrs))) {
+      k3_L <- which.min(distrs[["k3"]][["mu"]])
+      aucDistr2 <- dnorm(distrs[["k3"]][["x"]], mean = distrs[["k3"]][["mu"]][k3_R], 
+                         sd = distrs[["k3"]][["sigma"]][k3_R])
+      scalFact2 <- scalFact * (distrs[["k3"]][["lambda"]][k3_R]/distrs[["k3"]][["lambda"]][k3_L])
+      thisLwd <- ifelse(aucThrs["k3"] == aucThr, 3, 1)
+      lines(distrs[["k3"]][["x"]], scalFact2 * aucDistr2, 
+            col = "magenta", lwd = thisLwd, lty = 2)
+      rect(distrs[["k3"]][["mu"]][k3_R] - distrs[["k3"]][["sigma"]][k3_R], 
+           histMax - (histMax * 0.02), distrs[["k3"]][["mu"]][k3_R] + 
+             distrs[["k3"]][["sigma"]][k3_R], histMax, col = "#80808030", 
+           border = "#80808030")
+    }
+    aucThrs <- aucThrs[!is.na(aucThrs)]
+    if (length(aucThrs) > 0) {
+      pars <- list()
+      pars[["Global_k1"]] <- c(col1 = "#909090", col2 = "black", 
+                               pos = 0.9)
+      pars[["L_k2"]] <- c(col1 = "red", col2 = "darkred", 
+                          pos = 0.8)
+      pars[["R_k3"]] <- c(col1 = "magenta", col2 = "magenta", 
+                          pos = 0.6)
+      pars[["minimumDens"]] <- c(col1 = "blue", col2 = "darkblue", 
+                                 pos = 0.4)
+      pars[["tenPercentOfMax"]] <- c(col1 = "darkgreen", 
+                                     col2 = "darkgreen", pos = 0.9)
+      pars[["outlierOfGlobal"]] <- c(col1 = "darkgreen", 
+                                     col2 = "darkgreen", pos = 0.9)
+      for (thr in names(aucThrs)) {
+        thisLwd <- ifelse(aucThrs[thr] == aucThr, 5, 
+                          2)
+        thisLty <- ifelse(aucThrs[thr] == aucThr, 1, 
+                          3)
+        abline(v = aucThrs[thr], col = pars[[thr]][1], 
+               lwd = thisLwd, lty = thisLty)
+        xPos <- aucThrs[thr] * 1.01
+        if (aucThrs[thr] > (max(auc) * 0.8)) 
+          xPos <- 0
+        if (aucThrs[thr] == aucThr) 
+          text(xPos, histMax * as.numeric(pars[[thr]][3]), 
+               pos = 4, col = pars[[thr]][2], cex = 0.8, 
+               paste("AUC > ", signif(aucThrs[thr], 2), 
+                     "\n(", sum(auc > aucThrs[thr]), " cells)", 
+                     sep = ""))
+      }
+    }
+  }
+  return(list(selected = aucThr, thresholds = cbind(threshold = aucThrs, 
+                                                    nCells = sapply(aucThrs, function(x) sum(auc > x))), 
+              comment = commentMsg))
+}
+
+```
+
+Use adaptive thresholding for labeling samples as positive or negative for each lineage
+
+```{r}
+lineageDE_LFCthresholds = data.frame()
+```
+
+```{r}
+for(lin in unique(Lineage_DE$Lineage)){
+  thresholds = get_Threshold(Lineage_DE %>% filter(Lineage == lin, padj < 0.05) %>% pull(log2FoldChange), lin)$thresholds
+  lineageDE_LFCthresholds = 
+    bind_rows(
+      lineageDE_LFCthresholds,
+      data.frame(
+        'Lineage' = lin,
+        'K1_threshold' = thresholds['Global_k1','threshold'],
+        'K2_threshold' = thresholds['L_k2','threshold']
+    ))
+}
+```
+
+```{r, fig.height=6, fig.width=20}
+lineageDE_LFCthresholds %>% 
+  left_join(Lineage_DE) %>% filter(padj < 0.05) %>% 
+  mutate(Lineage = factor(Lineage, levels = c('HSC_MPP_LMPP', 'pDC_Myeloid_Prog', 'MLP_CLP_PreProB', 'Pro_B', 'Large_PreB', 'Small_PreB', 
+                                              'B', 'Naive_T', 'Cytotoxic_T_NK', 'Monocyte', 'Erythroid'))) %>% 
+  mutate(threshold = ifelse(log2FoldChange > K1_threshold, 'above', 'below')) %>% 
+  ggplot(aes(x = log2FoldChange, fill = threshold)) + 
+  geom_histogram(bins=100) + theme_pubr(legend = 'top') + 
+  scale_fill_brewer(palette = 'Dark2') + 
+  facet_wrap(.~Lineage, scale = 'free', ncol=6) + 
+  geom_vline(aes(xintercept = K1_threshold), lty=2)
+
+lineageDE_LFCthresholds
+```
+
+
+```{r}
+lineageDE_LFCthresholds %>% 
+  left_join(Lineage_DE) %>% 
+  mutate(Lineage = factor(Lineage, levels = c('HSC_MPP_LMPP', 'pDC_Myeloid_Prog', 'MLP_CLP_PreProB', 'Pro_B', 'Large_PreB', 'Small_PreB', 
+                                              'B', 'Naive_T', 'Cytotoxic_T_NK', 'Monocyte', 'Erythroid'))) %>% 
+  mutate(threshold = ifelse(log2FoldChange > K1_threshold, 'above', 'below')) %>% 
+  filter(threshold == 'above') %>% 
+  filter(padj < 0.05) %>% 
+  pull(Lineage) %>% table() %>% sort()
+```
+
+
+```{r}
+lineageDE_LFCthresholds %>% 
+  left_join(Lineage_DE) %>% arrange(-stat) %>% 
+  mutate(threshold = ifelse(log2FoldChange > K1_threshold, 'above', 'below')) %>% 
+  filter(threshold == 'below') %>% 
+  filter(padj < 0.05, Lineage == 'Small_PreB')
+```
+
+```{r}
+lineageDE_LFCthresholds %>% 
+  left_join(Lineage_DE) %>% arrange(-stat) %>% 
+  mutate(threshold = ifelse(log2FoldChange > K1_threshold, 'above', 'below')) %>% 
+  filter(threshold == 'above') %>% 
+  filter(padj < 0.05, Lineage == 'Small_PreB')
+```
+
+
+
+```{r}
+lineageDE_LFCthresholds = data.frame()
+```
+
+```{r}
+for(lin in unique(Lineage_DE$Lineage)){
+  thresholds = get_Threshold(Lineage_DE %>% filter(Lineage == lin) %>% pull(log2FoldChange), lin)$thresholds
+  lineageDE_LFCthresholds = 
+    bind_rows(
+      lineageDE_LFCthresholds,
+      data.frame(
+        'Lineage' = lin,
+        'K1_threshold' = thresholds['Global_k1','threshold'],
+        'K2_threshold' = thresholds['L_k2','threshold']
+    ))
+}
+```
+
+```{r, fig.height=6, fig.width=20}
+lineageDE_LFCthresholds %>% 
+  left_join(Lineage_DE) %>% 
+  mutate(Lineage = factor(Lineage, levels = c('HSC_MPP_LMPP', 'pDC_Myeloid_Prog', 'MLP_CLP_PreProB', 'Pro_B', 'Large_PreB', 'Small_PreB', 
+                                              'B', 'Naive_T', 'Cytotoxic_T_NK', 'Monocyte', 'Erythroid'))) %>% 
+  mutate(threshold = ifelse(log2FoldChange > K1_threshold, 'above', 'below')) %>% 
+  ggplot(aes(x = log2FoldChange, fill = threshold)) + 
+  geom_histogram(bins=100) + theme_pubr(legend = 'top') + 
+  scale_fill_brewer(palette = 'Dark2') + 
+  facet_wrap(.~Lineage, scale = 'free', ncol=6) + 
+  geom_vline(aes(xintercept = K1_threshold), lty=2)
+
+lineageDE_LFCthresholds
+```
+
+
+```{r}
+lineageDE_LFCthresholds %>% 
+  left_join(Lineage_DE) %>% 
+  mutate(Lineage = factor(Lineage, levels = c('HSC_MPP_LMPP', 'pDC_Myeloid_Prog', 'MLP_CLP_PreProB', 'Pro_B', 'Large_PreB', 'Small_PreB', 
+                                              'B', 'Naive_T', 'Cytotoxic_T_NK', 'Monocyte', 'Erythroid'))) %>% 
+  mutate(threshold = ifelse(log2FoldChange > K1_threshold, 'above', 'below')) %>% 
+  filter(threshold == 'above') %>% 
+  filter(padj < 0.05) %>% 
+  pull(Lineage) %>% table() %>% sort()
+```
+
+```{r}
+lineageDE_LFCthresholds %>% 
+  left_join(Lineage_DE) %>% 
+  mutate(Lineage = factor(Lineage, levels = c('HSC_MPP_LMPP', 'pDC_Myeloid_Prog', 'MLP_CLP_PreProB', 'Pro_B', 'Large_PreB', 'Small_PreB', 
+                                              'B', 'Naive_T', 'Cytotoxic_T_NK', 'Monocyte', 'Erythroid'))) %>% 
+  mutate(threshold = ifelse(log2FoldChange > K2_threshold, 'above', 'below')) %>% 
+  filter(threshold == 'above') %>% 
+  filter(padj < 0.05) %>% 
+  pull(Lineage) %>% table() %>% sort()
+```
+
+
+```{r}
+lineageDE_LFCthresholds %>% 
+  left_join(Lineage_DE) %>% arrange(-stat) %>% 
+  mutate(threshold = ifelse(log2FoldChange > K1_threshold, 'above', 'below')) %>% 
+  filter(threshold == 'below') %>% 
+  filter(padj < 0.05, Lineage == 'MLP_CLP_PreProB')
+```
+
+
+```{r}
+lineageDE_LFCthresholds %>% 
+  left_join(Lineage_DE) %>% arrange(-stat) %>% 
+  mutate(threshold = ifelse(log2FoldChange > K1_threshold & log2FoldChange < K2_threshold, 'above', 'below')) %>% 
+  filter(threshold == 'above') %>% 
+  filter(padj < 0.05, Lineage == 'MLP_CLP_PreProB')
+```
+
+```{r}
+lineageDE_LFCthresholds %>% 
+  left_join(Lineage_DE) %>% arrange(-stat) %>% 
+  mutate(threshold = ifelse(log2FoldChange > K2_threshold, 'above', 'below')) %>% 
+  filter(threshold == 'above') %>% 
+  filter(padj < 0.05, Lineage == 'MLP_CLP_PreProB')
+```
+
+
+
+## What about DESeq regression? 
+
+```{r}
+NMF_Lineages <- read_csv("CompositionAnalysis/NMF_LineageWeight_ConsensusCluster.csv") %>% 
+  mutate(Lineage = ifelse(Lineage == 'MLP_CLP_EarlyProB', 'MLP_CLP_PreProB', Lineage)) %>% 
+  select(CellType, Lineage)
+NMF_Lineages
+```
+
+```{r}
+ptanno <- read_delim('BALL_metadata_20230105.txt', delim = '\t')
+bulk_scRNA_IDconvert <- ptanno %>% mutate(ID_Bulk = ifelse(ID == 'SJINF022043_D1', 'SJINF022043_D', ID), ID_scRNA = Directory) %>% select(TB_ID = TB, ID_Bulk, ID_scRNA)
+bulk_scRNA_IDconvert
+```
+
+```{r}
+LineageComposition <- read_csv('BALL_89pt_Filtered_CompositionMatrix.csv') %>% 
+  pivot_longer(-Final_CellType, names_to = 'ID_scRNA', values_to = 'count') %>% 
+  dplyr::rename(CellType = Final_CellType) %>% 
+  left_join(NMF_Lineages) %>% 
+  filter(Lineage != 'NA') %>% 
+  group_by(ID_scRNA, Lineage) %>% 
+  summarise(count = sum(count)) %>% 
+  group_by(ID_scRNA) %>% 
+  mutate(proportion = count / sum(count)) %>% 
+  ungroup() %>% select(-count) %>% 
+  inner_join(bulk_scRNA_IDconvert)
+
+LineageComposition
+```
+
+```{r}
+LineageRegression_Design <- LineageComposition %>% 
+  mutate(Lineage = factor(Lineage, levels = c('HSC_MPP_LMPP', 'pDC_Myeloid_Prog', 'MLP_CLP_PreProB', 'Pro_B', 'Large_PreB', 'Small_PreB', 
+                                              'B', 'Naive_T', 'Cytotoxic_T_NK', 'Monocyte', 'Erythroid'))) %>% 
+  pivot_wider(id_cols = c(TB_ID, ID_scRNA, ID_Bulk), names_from = Lineage, values_from = proportion)
+  
+LineageRegression_Design
+```
+
+
+Regress with pseudobulk
+
+```{r}
+BALL_pseudobulk <- readRDS('BALLbulk_Deconvolution/BALL_89pt_pseudobulk.rds')
+BALL_pseudobulk
+```
+
+```{r}
+BALL_pseudobulk@meta.data <- BALL_pseudobulk@meta.data %>% rownames_to_column('ID_scRNA') %>% 
+  left_join(LineageRegression_Design) %>% 
+  column_to_rownames('ID_scRNA')
+
+BALL_pseudobulk@meta.data
+```
+
+```{r}
+Lineage_Corr_DESeq <- data.frame()
+
+for(lineage in c('HSC_MPP_LMPP', 'pDC_Myeloid_Prog', 'MLP_CLP_PreProB', 'Pro_B', 'Large_PreB', 'Small_PreB', 
+                 'B', 'Naive_T', 'Cytotoxic_T_NK', 'Monocyte', 'Erythroid')){
+  print(lineage)
+  start <- Sys.time()
+  
+  # Assign lineage as standardized variable name
+  BALL_pseudobulk@meta.data <- BALL_pseudobulk@meta.data %>% mutate(LineageProp = get(lineage))
+
+  # DESeq2
+  Lineage_dds <- DESeqDataSetFromMatrix(BALL_pseudobulk@assays$RNA@counts, 
+                                        colData = BALL_pseudobulk@meta.data, design = ~LineageProp)
+  Lineage_dds <- DESeq(Lineage_dds)
+  Lineage_Corr_DESeq <- bind_rows(Lineage_Corr_DESeq, 
+                          results(Lineage_dds) %>% as.data.frame() %>% rownames_to_column('Gene') %>% mutate(Lineage = lineage) %>% arrange(-stat))
+  
+  print( Sys.time() - start )
+
+}
+
+Lineage_Corr_DESeq %>% write_csv('BALL_Lineage_Correlations_DESeq.csv')
+```
+
+```{r}
+Lineage_Corr_DESeq %>% filter(padj < 0.05, stat > 0) %>% pull(Lineage) %>% table()
+```
+
+```{r}
+Lineage_Corr_DESeq %>% filter(padj < 0.05, stat > 0) %>% filter(Lineage == 'Naive_T')
+```
+
+
+
+
+
+
+
+
+```{r}
+# DESeq2
+LineageRegression_pseudobulk_dds <- DESeqDataSetFromMatrix(BALL_pseudobulk_mat,
+                                      colData = LineageRegression_Design %>% column_to_rownames('ID_scRNA'), 
+                                      design = ~Cytotoxic_T_NK)
+
+LineageRegression_pseudobulk_dds <- DESeq(LineageRegression_pseudobulk_dds)
+LineageRegression_pseudobulk_dds
+```
+
+
+
+
+**What about CLR normalized?**
+
+```{r}
+Lineage_compositionCLR <- read_csv("CompositionAnalysis/BALL_LineageComposition_CLR.csv") %>% 
+  left_join(bulk_scRNA_IDconvert, .) %>% column_to_rownames('ID_scRNA')
+
+Lineage_compositionCLR
+```
+
+```{r}
+BALL_pseudobulk_mat %>% dim()
+```
+
+
+```{r}
+# DESeq2
+LineageRegression_pseudobulk_CLR_dds <- DESeqDataSetFromMatrix(BALL_pseudobulk_mat,
+                                      colData = Lineage_compositionCLR[colnames(BALL_pseudobulk_mat),],
+                                      design = ~Cytotoxic_T_NK)
+
+LineageRegression_pseudobulk_CLR_dds <- DESeq(LineageRegression_pseudobulk_CLR_dds)
+LineageRegression_pseudobulk_CLR_dds
+```
+
+
+
+
+
+

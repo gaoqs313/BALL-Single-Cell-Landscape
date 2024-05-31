@@ -1,0 +1,338 @@
+---
+title: "BDev Pseudobulk DE"
+output: html_notebook
+---
+
+```{r}
+library(Seurat)
+library(presto)
+library(tidyverse)
+library(ggpubr)
+library(Libra)
+```
+
+```{r}
+bdev_expr <- SeuratDisk::LoadH5Seurat('../Bcell_Development_CrossOntogeny_bare.h5seurat', misc = FALSE)
+bdev_expr@meta.data
+```
+
+
+```{r, fig.height = 5, fig.width = 12}
+bdev_expr@meta.data <- bdev_expr@meta.data %>% rownames_to_column('Cell') %>% 
+  left_join(Bdev_ref$meta_data) %>% 
+  column_to_rownames('Cell')
+
+bdev_expr@meta.data
+```
+
+```{r}
+bdev_expr$Study %>% table()
+```
+
+
+## Wilcox AUC
+
+```{r}
+bdev_expr <- NormalizeData(bdev_expr)
+```
+
+```{r}
+BDevCellType_DE_wilcox <- wilcoxauc(bdev_expr, assay = 'data', group_by = 'BDevelopment_CellType_Comprehensive')
+BDevCellType_DE_wilcox
+```
+
+```{r}
+BDevCellType_DE_wilcox %>% mutate(pct_diff = pct_in - pct_out) %>% filter(pct_diff > 10) %>% 
+  group_by(group) %>% slice_max(n = 10, order_by = auc) #%>% filter()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+## Pseudobulk DE
+
+
+```{r}
+bdev_expr$replicate <- paste0(bdev_expr$Study, '_', bdev_expr$Technology, '_', bdev_expr$Tissue, '_', bdev_expr$Donor )
+bdev_expr$replicate %>% unique() %>% length()
+```
+
+```{r}
+pseudobulk_anno <- bdev_expr@meta.data %>%
+  group_by(replicate, Study_Tissue, BDevelopment_CellType_Comprehensive) %>%
+  summarise(nCells = n()) %>%
+  mutate(Replicate_CellType = paste0(replicate, '__', BDevelopment_CellType_Comprehensive %>% str_replace_all(' |-|/','_'))) %>%
+  column_to_rownames('Replicate_CellType')
+pseudobulk_anno
+```
+
+
+```{r}
+bdev_expr$Replicate_CellType <- paste0(bdev_expr$replicate, '__', bdev_expr$BDevelopment_CellType_Comprehensive %>% str_replace_all(' |-|/','_'))
+
+# aggregate count matrix by CellType
+pseudobulk <- SeuratDisk::Transpose(Matrix.utils::aggregate.Matrix(t(as(bdev_expr@assays$RNA@counts, 'matrix')),
+                                                                   groupings = bdev_expr$Replicate_CellType, fun = "sum"))
+pseudobulk
+```
+
+
+```{r}
+bdev_pseudobulk <- CreateSeuratObject(pseudobulk[,rownames(pseudobulk_anno)], meta.data = pseudobulk_anno)
+bdev_pseudobulk
+```
+
+
+```{r}
+bdev_pseudobulk %>% saveRDS('BDevelopment_Pseudobulk_byDonor_CellType.rds')
+```
+
+**B Development**
+
+```{r}
+bdev_pseudobulk <- readRDS('BDevelopment_Pseudobulk_byDonor_CellType.rds')
+```
+
+```{r}
+bdev_pseudobulk@meta.data
+```
+
+
+```{r, fig.height = 5, fig.width = 15}
+bdev_pseudobulk@meta.data %>% 
+  ggplot(aes(x = reorder(BDevelopment_CellType_Comprehensive, X = -nCells, FUN = median), y = nCells)) + 
+  geom_boxplot(outlier.size=0) + ggbeeswarm::geom_quasirandom(width=0.3, size=0.02) +
+  theme_pubr() + scale_y_log10() + theme(axis.text.x = element_text(angle=60, hjust=1)) +
+  geom_hline(yintercept=5, lty = 2)
+
+```
+
+```{r}
+# subset minimum of 5 cells for DE 
+bdev_pseudobulk <- subset(bdev_pseudobulk, nCells >= 5)
+```
+
+
+```{r}
+keep_celltypes <- bdev_pseudobulk@meta.data %>% group_by(BDevelopment_CellType_Comprehensive) %>% summarise(count = n()) %>% filter(count >= 5) %>% pull(BDevelopment_CellType_Comprehensive)
+keep_celltypes
+```
+## Run pseudobulk 
+
+```{r}
+bdev_pseudobulk_subset <- subset(bdev_pseudobulk, BDevelopment_CellType_Comprehensive %in% c('Mature B Unk', 'Mature B Cycling'))
+```
+
+
+```{r}
+# CellType_DE <- data.frame()
+# 
+# for(celltype in unique(keep_celltypes)){  
+#   
+#   print(celltype)
+#   start <- Sys.time()
+#   
+#   # condition
+#   bdev_pseudobulk_subset$Condition <- ifelse(bdev_pseudobulk_subset$BDevelopment_CellType_Comprehensive == celltype, 1, 0) %>% factor()
+#   included_batches <- bdev_pseudobulk_subset@meta.data %>% filter(Condition == 1) %>% pull(Study_Tissue) 
+#   
+#   # DESeq2
+#   CellType_dds <- DESeqDataSetFromMatrix(subset(bdev_pseudobulk_subset, Study_Tissue %in% included_batches)@assays$RNA@counts, 
+#                                         colData = subset(bdev_pseudobulk_subset, Study_Tissue %in% included_batches)@meta.data, design = ~Study_Tissue + Condition)
+#   CellType_dds <- DESeq(CellType_dds)
+#   CellType_DE <- bind_rows(CellType_DE, 
+#                            results(CellType_dds) %>% as.data.frame() %>% rownames_to_column('Gene') %>% 
+#                            mutate(CellType = celltype) %>% arrange(-stat))
+#   
+#   print( Sys.time() - start )
+# 
+# }
+# 
+# CellType_DE %>% write_csv('BDevelopment_CellType_DEresults.csv')
+```
+
+
+```{r}
+bdev_pseudobulk$Study_Tissue %>% str_replace_all(' ','_') %>% table()
+```
+
+```{r}
+DESeq(test = 'LRT')
+```
+
+
+
+
+
+
+```{r}
+CellType_DE <- data.frame()
+
+
+for(celltype in unique(bmcat_pseudobulk$CellType_Annotation)){
+  
+  print(celltype)
+  start <- Sys.time()
+  
+  # condition
+  bmcat_pseudobulk$Condition <- ifelse(bmcat_pseudobulk$CellType_Annotation == celltype, 1, 0) %>% factor()
+  included_donors <- bmcat_pseudobulk@meta.data %>% filter(Condition == 1) %>% pull(Donor) 
+  
+  # DESeq2
+  CellType_dds <- DESeqDataSetFromMatrix(subset(bmcat_pseudobulk, Donor %in% included_donors)@assays$RNA@counts, 
+                                        colData = subset(bmcat_pseudobulk, Donor %in% included_donors)@meta.data, design = ~Donor + Condition)
+  CellType_dds <- DESeq(CellType_dds)
+  CellType_DE <- bind_rows(CellType_DE, 
+                           results(CellType_dds) %>% as.data.frame() %>% rownames_to_column('Gene') %>% 
+                           mutate(CellType = celltype) %>% arrange(-stat))
+  
+  print( Sys.time() - start )
+
+}
+
+CellType_DE %>% write_csv('BMRefMap_CellType_DEresults.csv')
+```
+
+
+
+
+
+
+
+
+```{r}
+library(DESeq2)
+
+CellType_dds <- DESeqDataSetFromMatrix(bmcat_pseudobulk@assays$RNA@counts, 
+                                      colData = bmcat_pseudobulk@meta.data, design = ~Donor + CellType_Annotation)
+CellType_dds <- DESeq(CellType_dds)
+
+CellType_dds
+```
+
+```{r}
+CellType_dds %>% saveRDS('BMRefMap_PseudoBulk_CellTypeDE.rds')
+```
+
+```{r}
+bmref_celltypes <- CellType_dds$CellType_Annotation %>% unique() %>% sort()
+select_celltype <- 'HSC'
+remaining_celltypes <- bmref_celltypes[bmref_celltypes != select_celltype] %>% as.character() %>% str_replace_all(' |-', '.')
+
+remaining_celltypes 
+```
+
+```{r}
+resultsNames(CellType_dds)[resultsNames(CellType_dds) %>% str_detect('CellType')] %>% 
+  str_replace('CellType_Annotation_', '') %>% str_replace('_.*', '')
+```
+
+
+
+```{r}
+resultsNames(CellType_dds)
+```
+
+
+```{r}
+results(CellType_dds, 
+        contrast = list(c('HSC'), 
+                        c('MPP.MyLy', 'MPP.MkEry')), 
+        listValues = c(1, -1/2))
+```
+
+
+
+
+```{r}
+# results(dds, 
+#         contrast=list(c("conditionA"), 
+#                       c("conditionB","conditionC","conditionD","conditionE")),
+#         listValues=c(1, -1/4))
+```
+
+
+
+
+```{r}
+library(DESeq2)
+CellType_pseudobulk_DE <- data.frame()
+
+for(celltype in unique(bmcat_pseudobulk$CellType_Annotation)){
+  print(celltype)
+  # condition
+  bmcat_pseudobulk$Condition <- ifelse(bmcat_pseudobulk$CellType_Annotation == celltype, 1, 0) %>% as.factor()
+
+  # DESeq2
+  CellType_dds <- DESeqDataSetFromMatrix(bmcat_pseudobulk@assays$RNA@counts, 
+                                        colData = bmcat_pseudobulk@meta.data, design = ~Condition)
+  CellType_dds <- DESeq(CellType_dds)
+  CellType_pseudobulk_DE <- bind_rows(CellType_pseudobulk_DE, 
+                                      results(CellType_dds) %>% as.data.frame() %>% rownames_to_column('Gene') %>% mutate(CellType = celltype) %>% filter(stat > 0) %>% arrange(-stat))
+}
+
+CellType_pseudobulk_DE %>% write_csv('BMRefMap_Pseudobulk_CellType_DEresults.csv')
+```
+
+
+
+
+
+```{r}
+readRDS('BDevelopment_Pseudobulk_byDonor_CellType.rds')
+```
+
+
+
+```{r}
+CellType_pseudobulk_DE <- read_csv('BMRefMap_Pseudobulk_CellType_DEresults.csv')
+CellType_pseudobulk_DE
+```
+
+
+
+
+```{r}
+Lineage_DE_markers <- Lineage_DE %>% 
+  mutate(padj = ifelse(padj < 1e-300, 1e-300, padj),
+         log10FDR = -log10(padj),
+         MarkerScore = (log2FoldChange * stat * log10FDR) ^ (1/3)) %>% 
+  filter(Lineage %in% c('HSC_MPP_LMPP', 'Myeloid_Progenitor', 'Pre_pDC', 'MLP_CLP_PreProB', 'Pro_B', 'Pre_B')) %>%#, 'Mature_B')) %>% 
+  mutate(Lineage = factor(Lineage, levels = c('HSC_MPP_LMPP', 'Myeloid_Progenitor', 'MLP_CLP_PreProB', 'Pre_pDC', 'Pro_B', 'Pre_B'))) %>%#, 'Mature_B'))) %>% 
+  group_by(Gene) %>% top_n(n = 1, wt = log10FDR) %>% 
+  arrange(-MarkerScore) %>% group_by(Lineage) %>% top_n(n = 100, wt = MarkerScore) %>% 
+  arrange(Lineage)
+
+Lineage_DE_markers
+```
+
+```{r}
+BALL_pseudobulk_subset <- subset(BALL_pseudobulk, Lineage %in% c('HSC_MPP_LMPP', 'Myeloid_Progenitor', 'Pre_pDC', 'MLP_CLP_PreProB', 'Pro_B', 'Pre_B'))#, 'Mature_B'))
+BALL_pseudobulk_subset <- ScaleData(BALL_pseudobulk_subset, assay = 'RNA', features = Lineage_DE_markers$Gene)
+BALL_pseudobulk_subset$Lineage <- factor(BALL_pseudobulk_subset$Lineage, levels = c('HSC_MPP_LMPP', 'Myeloid_Progenitor',  'MLP_CLP_PreProB', 'Pre_pDC', 'Pro_B', 'Pre_B'))#, 'Mature_B'))
+DoHeatmap(BALL_pseudobulk_subset, features = Lineage_DE_markers$Gene, group.by = 'Lineage', slot = 'scale.data')
+```
+
+```{r, fig.height = 4, fig.width = 8}
+BALL_pseudobulk_subset$Lineage_new <- factor(BALL_pseudobulk_subset$Lineage %>% str_replace('HSC_MPP_LMPP', 'HSC / MPP') %>% str_replace('Myeloid_Progenitor', 'Myeloid Prog') %>% 
+                                               str_replace('MLP_CLP_PreProB', 'Early Lymphoid') %>% str_replace('_','-'), 
+                                             levels = c('HSC / MPP', 'Myeloid Prog',  'Early Lymphoid', 'Pre-pDC', 'Pro-B', 'Pre-B'))#, 'Mature_B'))
+
+DoHeatmap(BALL_pseudobulk_subset, features = Lineage_DE_markers$Gene, group.by = 'Lineage_new', slot = 'scale.data', disp.min = -2, disp.max = 2.5)
+ggsave('BDev_Figures/BALL_DevelopmentalStates_Top100_DEgenes.pdf', height = 8.5, width = 15, device='pdf')
+```
+
+
+
+
+
+
+
