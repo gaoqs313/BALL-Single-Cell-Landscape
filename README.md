@@ -102,25 +102,31 @@ Fig4.2_BALL_CompositionHeatmap.Rmd
 ```
 
 ==========================================================
-## Bulk RNA-seq analysis using LASSO regression
+## Bulk RNA-seq quantification of B-ALL developmental states
 
-Bulk RNA-seq analysis using LASSO regression (ED Fig. 7)
-```
-ED Fig. 7_DevState_LASSOregression.Rmd
-ED Fig. 7_DevState_LASSOregression.html
-```
+We provide a series of notebooks outlining our approach to quantification of B-ALL developmental states in bulk RNA-seq data. This approach starts with: 
+ - [Identification of differentially expressed genes across B-ALL developmental states](https://htmlpreview.github.io/?https://github.com/gaoqs313/BALL-Single-Cell-Landscape/blob/main/Fig5.0a_setup_BALL_Lineage_DE.nb.html)
+ - [Identification of genes correlated with developmental state abundance across 85 pseudobulk profiles](https://github.com/gaoqs313/BALL-Single-Cell-Landscape/blob/main/Fig5.0b_NMFregression.R), filtered further by applying [adaptive thresholding within significantly correlated genes](https://github.com/gaoqs313/BALL-Single-Cell-Landscape/blob/main/Fig5.0d_MarkerGeneSelection.nb.html)
+ - [Identification of differentially expressed genes across normal B cell development](https://github.com/gaoqs313/BALL-Single-Cell-Landscape/blob/main/Fig5.0c_BDev_pseudobulkDE.nb.html)
 
-B-ALL Dev State Analysis (Fig. 5a-c, ED Fig. 6-8)
+From the intersection of these genesets (differentially expressed across normal B cell development, differentially expressed across B-ALL cell developmental states, and correlated with developmental state abundance across pseudobulk profiles), we developed a regression based approach to [quantify B-ALL developmental states in bulk RNA-seq data](https://htmlpreview.github.io/?https://github.com/gaoqs313/BALL-Single-Cell-Landscape/blob/main/Fig5.0e_DevState_LASSOregression.nb.html). We found that for large scRNA-seq cohorts like this one (89 samples), this outperformed deconvolution with CIBERSORTx, BayesPrism, and DWLS for accurate quantification of various malignant cell states.
+
+Notebooks and scripts related to methodology in Figure 5
 ```
-Fig5a-c_BALL_Multipotency_Characterization.ipynb
+Fig5.0a_setup_BALL_Lineage_DE.Rmd
+Fig5.0b_NMFregression.R
+Fig5.0c_BDev_pseudobulkDE.Rmd
+Fig5.0d_MarkerGeneSelection.Rmd
+Fig5.0e_DevState_LASSOregression.Rmd
 ```
 
 ==========================================================
-## B-ALL Composition Multipotency Score
+## B-ALL Cohort Analysis and the B-ALL Multipotency Score 
 
-B-ALL Composition Multipotency Score (Fig. 5 d-l, Fig. 6, ED Fig. 9-10)
+Following successful quantification of B-ALL developmental states in bulk RNA-seq data, we applied this to a cohort of 2046 samples spanning pediatric and adult B-ALL. Principal component analysis revealed an axis of Multipotency vs Commitment, and we captured this axis through a 99-gene score which we termed the B-ALL Multipotency Score. The derivation and clinical characterization of this score are shown in this [R notebook](https://htmlpreview.github.io/?https://github.com/gaoqs313/BALL-Single-Cell-Landscape/blob/main/Fig5and6_MultipotencyScore_ClinicalAssociations.nb.html), with further clinical characterization done in this [jupyter notebook](https://htmlpreview.github.io/?https://github.com/gaoqs313/BALL-Single-Cell-Landscape/blob/main/Fig5and6_MultipotencyScore_ClinicalAssociations_extended.ipynb). These two notebooks cover the analyses for Figure 5 and Figure 6 of the manuscript.
+
 ```
-Fig5i-l&6_BALL_MultipotencyScore.Rmd
-Fig5i-l&6_BALL_MultipotencyScore.html
+Fig5and6_MultipotencyScore_ClinicalAssociations.Rmd
+Fig5and6_MultipotencyScore_ClinicalAssociations_extended.ipynb
 ```
 
