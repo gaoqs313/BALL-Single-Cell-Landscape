@@ -8,17 +8,17 @@ This is the repository for scripts used in our manuscript "SINGLE CELL DISSECTIO
 
 Generate merged UMAP color-coded by subtype (Fig. 1b), cell type (ED Fig. 1c), or tissue (ED Fig. 1d)
 ```
-Rscript Fig1b_UMAP_Merge.R
+Rscript Fig1c-d_UMAP_Merge.R
 ```
 
 Generate tSNE of bulk RNA-seq and pseudo-bulk RNA-seq samples (ED Fig. 1b)
 ```
-Rscript EDFig1b_tSNE_bulk.R
+Rscript Fig1b_tSNE_bulk.R
 ```
 
 Check somatic mutations in this cohort (ED Fig. 1a)
 ```
-Rscript EDFig1a_oncoprint.R
+Rscript SuppFig1a_oncoprint.R
 ```
 
 ==========================================================
@@ -86,7 +86,7 @@ Notebooks and scripts related to analyses in Figure 3
 ```
 Fig3.0_BDev_ProjectionSetup.Rmd
 Fig3.1_BDevelopment_Atlas_Characterization.Rmd
-Fig3f_CEBPA_ATAC.R
+Fig3e_CEBPA_ATAC.R
 ```
 
 ==========================================================
@@ -123,10 +123,10 @@ Fig5.0e_DevState_LASSOregression.Rmd
 ==========================================================
 ## B-ALL Cohort Analysis and the B-ALL Multipotency Score 
 
-Following successful quantification of B-ALL developmental states in bulk RNA-seq data, we applied this to a cohort of 2046 samples spanning pediatric and adult B-ALL. Principal component analysis revealed an axis of Multipotency vs Commitment, and we captured this axis through a 99-gene score which we termed the B-ALL Multipotency Score. The derivation and clinical characterization of this score are shown in this [R notebook](https://htmlpreview.github.io/?https://github.com/gaoqs313/BALL-Single-Cell-Landscape/blob/main/Fig5and6_MultipotencyScore_ClinicalAssociations.nb.html), with further clinical characterization done in this [jupyter notebook](https://htmlpreview.github.io/?https://github.com/gaoqs313/BALL-Single-Cell-Landscape/blob/main/Fig5and6_MultipotencyScore_ClinicalAssociations_extended.ipynb). These two notebooks cover the analyses for Figure 5 and Figure 6 of the manuscript.
+Following successful quantification of B-ALL developmental states in bulk RNA-seq data, we applied this to a cohort of 2046 samples spanning pediatric and adult B-ALL. Principal component analysis revealed an axis of Multipotency vs Commitment, and we captured this axis through a 99-gene score which we termed the B-ALL Multipotency Score. The derivation and clinical characterization of this score are shown in this [R notebook](https://htmlpreview.github.io/?https://github.com/gaoqs313/BALL-Single-Cell-Landscape/blob/main/Fig5and6_MultipotencyScore_ClinicalAssociations.nb.html), with further clinical characterization done in this [jupyter notebook](https://htmlpreview.github.io/?https://github.com/gaoqs313/BALL-Single-Cell-Landscape/blob/main/Fig5and6_MultipotencyScore_ClinicalAssociations_extended.ipynb). These two notebooks cover the analyses for Figures 5-7 of the manuscript.
 
 ```
-Fig5and6_MultipotencyScore_ClinicalAssociations.Rmd
-Fig5and6_MultipotencyScore_ClinicalAssociations_extended.ipynb
+Fig5-7_MultipotencyScore_ClinicalAssociations.Rmd
+Fig5-7_MultipotencyScore_ClinicalAssociations_extended.ipynb
 ```
 
